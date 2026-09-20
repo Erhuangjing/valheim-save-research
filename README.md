@@ -104,6 +104,10 @@ prefab   (int32, StableHash)
 唯一实测走通的"服务端临时执行器"链路、skill 七段流水线设计）见
 `docs/Valheim_蓝图无mod落地_skill可行性调研.md`。
 
+**唯一实测走通的路线 = 启动 dedicated server 时进程内实时构建**（处理地形 + 清障 + 建房，客户端零 mod、
+落地后删净 BepInEx）。完整启动时序与全部 Harmony patch 见 `docs/Valheim_服务端实时构建机制_详解.md`，
+配套参考代码骨架见 `tools/xibpbuilder_reference/`（**从实验日志重建、未编译验证**，见其 README 免责）。
+
 ---
 
 ## 四、已知坑
@@ -135,6 +139,7 @@ Valheim 1.0 起，控制台命令（`devcommands` / `spawn` 等）会在**角色
 docs/      研究文档（技术报告、实验记录、社区参考结论、复盘）
 format/    prefab 名 ↔ 哈希对照表（57,706 条）
 tools/     解析与改写脚本
+tools/xibpbuilder_reference/   服务端实时构建插件的参考代码骨架（重建、未编译验证）
 ```
 
 ### tools 说明

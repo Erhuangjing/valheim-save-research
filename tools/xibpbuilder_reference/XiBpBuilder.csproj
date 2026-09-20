@@ -1,0 +1,44 @@
+<!-- REF: 工程文件按交接文档 §2.2（netstandard2.1 + .NET SDK 9）重建；引用路径需按本机 Valheim/BepInEx 安装位置改 -->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>XiBpBuilder</AssemblyName>
+    <RootNamespace>XiBpBuilder</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <!-- 部署到专用服务器 BepInEx\plugins\ -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <!--
+    ⚠️ 下面三个引用的路径是占位符，构建前必须改成你机器上的真实路径：
+      1) 游戏程序集  assembly_valheim.dll
+         专用服务器: <服务器>\valheim_server_Data\Managed\assembly_valheim.dll
+         游戏本体:   <Valheim>\valheim_Data\Managed\assembly_valheim.dll
+      2) BepInEx 核心  BepInEx.dll / BepInEx.Harmony / 0Harmony.dll
+         <服务器>\BepInEx\core\
+      3) UnityEngine 模块（Physics/Quaternion 等在 UnityEngine.CoreModule.dll）
+         <服务器>\valheim_server_Data\Managed\
+    本仓库不含这些二进制（.gitignore 排除），故本工程在本沙箱无法还原/编译。
+  -->
+  <ItemGroup>
+    <Reference Include="assembly_valheim">
+      <HintPath>REPLACE_ME\valheim_server_Data\Managed\assembly_valheim.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>REPLACE_ME\BepInEx\core\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>REPLACE_ME\BepInEx\core\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>REPLACE_ME\valheim_server_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

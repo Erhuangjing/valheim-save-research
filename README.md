@@ -100,6 +100,10 @@ prefab   (int32, StableHash)
 
 **离线裸改存档来"落地整栋建筑"走不通**。社区共识 + 源码印证：所有世界编辑类 mod（PlanBuild 等）都必须在游戏进程内调用 `ZNetScene.instance.CreateObject(ZDOMan.instance.GetZDO(zdoid))`。
 
+「不装 mod、用 skill 直接落地 `.blueprint` / `.vbuild` 蓝图」的系统性可行性调研（含六条路线证据矩阵、
+唯一实测走通的"服务端临时执行器"链路、skill 七段流水线设计）见
+`docs/Valheim_蓝图无mod落地_skill可行性调研.md`。
+
 ---
 
 ## 四、已知坑
@@ -144,6 +148,7 @@ tools/     解析与改写脚本
 | `insert_portal.py` | **在指定坐标插入一个传送门**（模板复制法，含完整流程） |
 | `land_official.py` | 蓝图落地（密度法定 chunk + 自动锚点） |
 | `anchor_diff.py` | 锚点差分定位 |
+| `bp_parse.py` | **通用蓝图解析器**（`.blueprint` / `.vbuild` / zip / 市场 blob → 件清单 + 落地预检报告，含 GroundLayerPy 自动推导） |
 | `clear_devcommands.py` | **清除角色档的作弊标记**（含进程检查 + 备份 + dry-run） |
 | `check_cheat.py` | 检查角色/世界存档里的作弊标记 |
 | `check_fields.py` / `find_field_name.py` | 字段哈希反查 |

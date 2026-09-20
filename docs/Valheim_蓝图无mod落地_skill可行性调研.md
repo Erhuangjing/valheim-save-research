@@ -285,9 +285,9 @@ JereKuusela 的 Expand World Data 支持在**世界生成期**把 `.blueprint`/`
 |---|---|---|
 | 格式解析 | **`bp_parse.py` ✅（本轮补齐）** | — |
 | prefab 哈希 | `format/prefab-hashlib.json`（57,706 条）+ StableHash（双实测锚点值） | 库缺口用 StableHash 兜底已内建 |
-| 存档只读/对账 | `zdo_lib.py`（walk/candidates/计数同步）、`zdo_v10.py`、`chunks_index.py`、`anchor_diff.py` | 对账脚本（`usagi_collapse.py`）未入库，需按坑 C.2 重写入库 |
-| 执行器 | 设计/配置/日志判读全部文档化（交接文档 §5、收官报告 §5 配方） | **`Plugin.cs` 本体未入库**（在用户 Windows 机器）——skill 发布的最大缺口 |
-| 编排 | 操作手册两份（插件版 v0.4 / 使用说明） | 串成一条脚本（收官报告 §9.5 也点了这一项） |
+| 存档只读/对账 | `zdo_lib.py`（walk/candidates/计数同步）、`zdo_v10.py`、`chunks_index.py`、`anchor_diff.py` | —（**`bp_reconcile.py` 已入库**：hash+位置双匹配、y 量化，selftest 三案全过） |
+| 执行器 | 设计/配置/日志判读全部文档化（交接文档 §5、收官报告 §5 配方） | Plugin.cs 本体仍在用户 Windows 机器；**参考重建已入库**（`tools/xibpbuilder_reference/`，未编译验证） |
+| 编排 | 操作手册两份（插件版 v0.4 / 使用说明） | —（**`bp_pipeline.py` 已入库**：七段一条命令，断点续跑 + dry-run + 铁律内建） |
 | 落点选择 | `[Cleanup]` 保护圈、天然平地案例 (-345,315) | `AutoFindFlat` 仍是手填落点坐标 |
 | 铁律 | 坑清单 13+3 条、采样陷阱、"件数时序判崩塌" | 提炼进 SKILL.md 决策树 |
 

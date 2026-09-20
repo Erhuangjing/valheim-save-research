@@ -54,3 +54,5 @@ cd bpbuild_reference
 这份代码 = 可行性调研里七段流水线的**第 4~5 段（部署执行器 + headless 落地）的执行体**。
 skill 负责它前后的纯离线部分：`bp_parse.py`（解析/预检）→ 备份 → 生成 cfg → 起服盯日志 →
 离线对账（`zdo_lib.py`）→ 删 BepInEx 四件套 → 出报告。
+**该编排已入库**：`tools/bp_pipeline.py` 一条命令串起七段（preflight/backup/install/run/verify/teardown/report，
+断点续跑、dry-run、铁律内建）；对账用 `tools/bp_reconcile.py`（坑 C.2 双匹配）。

@@ -155,7 +155,8 @@ tools/xibpbuilder_reference/   服务端实时构建插件的参考代码骨架�
 | `anchor_diff.py` | 锚点差分定位 |
 | `bp_parse.py` | **通用蓝图解析器**（`.blueprint` / `.vbuild` / zip / 市场 blob → 件清单 + 落地预检报告，含 GroundLayerPy 自动推导） |
 | `bp_reconcile.py` | **落地离线对账**（期望件 vs 存档实况，hash+位置双匹配 y 量化；坑 C.2 的入库版，含 selftest） |
-| `bp_pipeline.py` | **七段流水线编排器**（解析预检→备份→部署执行器→headless 盯日志→离线对账→删净 BepInEx→报告，一条命令；铁律内建，支持断点续跑与 dry-run） |
+| `bp_pipeline.py` | **七段流水线编排器**（解析预检→自动选点→备份→部署执行器→headless 盯日志→离线对账→删净 BepInEx→报告，一条命令；铁律内建，支持断点续跑与 dry-run） |
+| `bp_autosite.py` | **AutoFindFlat 离线选落点**（持久自然物 ZDO 的 y 做地表代理测高：平坦/陆地/无人区/样本足四判据，产出候选落点+PlatformY；selftest 三案全过） |
 | `clear_devcommands.py` | **清除角色档的作弊标记**（含进程检查 + 备份 + dry-run） |
 | `check_cheat.py` | 检查角色/世界存档里的作弊标记 |
 | `check_fields.py` / `find_field_name.py` | 字段哈希反查 |

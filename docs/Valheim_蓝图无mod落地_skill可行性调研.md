@@ -288,7 +288,7 @@ JereKuusela 的 Expand World Data 支持在**世界生成期**把 `.blueprint`/`
 | 存档只读/对账 | `zdo_lib.py`（walk/candidates/计数同步）、`zdo_v10.py`、`chunks_index.py`、`anchor_diff.py` | —（**`bp_reconcile.py` 已入库**：hash+位置双匹配、y 量化，selftest 三案全过） |
 | 执行器 | 设计/配置/日志判读全部文档化（交接文档 §5、收官报告 §5 配方） | Plugin.cs 本体仍在用户 Windows 机器；**参考重建已入库**（`tools/xibpbuilder_reference/`，未编译验证） |
 | 编排 | 操作手册两份（插件版 v0.4 / 使用说明） | —（**`bp_pipeline.py` 已入库**：七段一条命令，断点续跑 + dry-run + 铁律内建） |
-| 落点选择 | `[Cleanup]` 保护圈、天然平地案例 (-345,315) | `AutoFindFlat` 仍是手填落点坐标 |
+| 落点选择 | `[Cleanup]` 保护圈、天然平地案例 (-345,315) | —（**`bp_autosite.py` 已入库**：自然物 y 代理测高自动挑平地，产出落点+PlatformY；caveat：基岩高度由种子生成、不在存档里，少人踩点区无样本需进游戏目视确认） |
 | 铁律 | 坑清单 13+3 条、采样陷阱、"件数时序判崩塌" | 提炼进 SKILL.md 决策树 |
 
 ### 4.4 SKILL.md 应固化的铁律（从踩坑清单提炼）

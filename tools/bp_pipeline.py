@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """bp_pipeline —— 蓝图落地一条命令编排器（七段流水线，可行性调研 §4.2 的落地实现）。
 
-把「解析预检 → 备份 → 部署执行器 → headless 落地盯日志 → 离线对账 → 删净 BepInEx → 报告」
+把「解析预检 → 自动选点 → 备份 → 部署执行器 → headless 落地盯日志 → 离线对账 → 删净 BepInEx → 报告」
 串成可断点续跑的阶段机：阶段状态落 <work>/state.json，任何一段失败即停，重跑只补缺的段。
 
     python bp_pipeline.py preflight --bp usagi.blueprint --work runs/usagi1
+    python bp_pipeline.py autosite  --work runs/usagi1 --world "D:/.../worlds_local/WORLD"
     python bp_pipeline.py backup    --work runs/usagi1 --world "D:/.../worlds_local/WORLD"
     python bp_pipeline.py install   --work runs/usagi1 --server "D:/.../Valheim dedicated server" \
                                      --bepinex-src "E:/.../BepInExPack_Valheim" --plugin-dll XiBpBuilder.dll \
@@ -36,10 +37,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import bp_parse            # noqa: E402
 import bp_reconcile        # noqa: E402
+import bp_autosite         # noqa: E402
 
 CFG_GUID = 'com.world.bpbuild'          # 与 xibpbuilder_reference/Plugin.cs 的 BepInPlugin 一致
 FOUR_PIECE = ['winhttp.dll', 'doorstop_config.ini', 'doorstop_libs', 'BepInEx']
-STAGES = ['preflight', 'backup', 'install', 'run', 'verify', 'teardown', 'report']
+STAGES = ['preflight', 'autosite', 'backup', 'install', 'run', 'verify', 'teardown', 'report']
 
 # run 段盯日志的标记（对齐 xibpbuilder_reference/Plugin.cs 的 Log.LogInfo 文案；
 # 兼容真版 v0.31 的「实例化就绪」措辞 —— 收官报告 §6 合格标准表）
@@ -176,6 +178,44 @@ def cmd_backup(a, st):
     return True
 
 
+# ---------------------------------------------------------------- 2.5 autosite（只读，不需先备份）
+def cmd_autosite(a, st):
+    world = a.world or st['stages'].get('backup', {}).get('dest')
+    if not world or not os.path.isdir(world):
+        die('找不到世界目录：--world（autosite 只读扫描，不需要先备份）')
+    fw = fd = 32.0
+    man = os.path.join(a.work, 'manifest.json')
+    if os.path.isfile(man):                       # 有 manifest 就按蓝图占地定格子
+        with open(man, encoding='utf-8') as f:
+            m = json.load(f)
+        xs = [q['x'] for q in m['pieces']] or [0]
+        zs = [q['z'] for q in m['pieces']] or [0]
+        fw = max(32.0, max(xs) - min(xs))
+        fd = max(32.0, max(zs) - min(zs))
+    tile_w, tile_d = fw + 2 * a.site_margin, fd + 2 * a.site_margin
+    records = bp_reconcile.full_scan(world, bp_reconcile.load_hashlib())
+    sites, rej = bp_autosite.find_sites(records, tile_w=tile_w, tile_d=tile_d,
+                                        water_level=a.water_level,
+                                        min_samples=a.min_samples,
+                                        max_spread=a.max_spread, top=a.top)
+    print('扫描 %d 条记录 | 格子 %.0f×%.0f m | 拒绝统计: %s' % (len(records), tile_w, tile_d, rej))
+    if not sites:
+        print('✗ 无合格落点：放宽 --max-spread / --min-samples，或换区域'
+              '（样本稀疏 = 少人踩点，可能空旷但无法验平，需进游戏目视确认）')
+        stage(st, 'autosite', ok=False, rejects=rej)
+        return False
+    print('%-12s %-12s %-10s %-6s %-5s %s' % ('site_x', 'site_z', 'PlatformY', '起伏', '样本', '自然物(树/岩/采集)'))
+    for q in sites:
+        print('%-12.1f %-12.1f %-10.2f %-6.2f %-5d %d/%d/%d'
+              % (q['site_x'], q['site_z'], q['platform_y'], q['spread'], q['samples'],
+                 q['trees'], q['rocks'], q['pickables']))
+    b = sites[0]
+    stage(st, 'autosite', ok=True, site_x=b['site_x'], site_z=b['site_z'],
+          platform_y=b['platform_y'], stats=b, rejects=rej, tile=[tile_w, tile_d])
+    print('✓ autosite：推荐 (%.1f, %.1f) PlatformY=%.2f —— install 自动采用，--site-x/--site-z 可手动覆盖'
+          % (b['site_x'], b['site_z'], b['platform_y']))
+    return True
+
 # ---------------------------------------------------------------- 4. install
 def gen_cfg(p):
     """生成 BepInEx cfg（键名对齐 xibpbuilder_reference/Plugin.cs 的 Config.Bind）。"""
@@ -211,10 +251,18 @@ def cmd_install(a, st):
     if not (os.path.isfile(a.plugin_dll)):
         die('--plugin-dll 不存在: %s' % a.plugin_dll)
     require_server_down('install')
-    params = {'site_x': a.site_x, 'site_z': a.site_z, 'platform_y': a.platform_y,
+    auto = st['stages'].get('autosite') or {}
+    site_x = a.site_x if a.site_x is not None else auto.get('site_x')
+    site_z = a.site_z if a.site_z is not None else auto.get('site_z')
+    platform_y = a.platform_y if a.platform_y is not None else auto.get('platform_y')
+    if site_x is None or site_z is None or platform_y is None:
+        die('缺落点参数：--site-x/--site-z/--platform-y，或先跑 autosite 自动选点')
+    params = {'site_x': site_x, 'site_z': site_z, 'platform_y': platform_y,
               'ground_py': a.ground_py if a.ground_py is not None
               else st['stages'].get('preflight', {}).get('ground_py', -1.6),
               'radius': a.radius, 'protect_x': a.protect_x, 'protect_z': a.protect_z}
+    if auto.get('site_x') == site_x and auto.get('site_z') == site_z:
+        print('  落点取自 autosite：(%s, %s) PlatformY=%s' % (site_x, site_z, platform_y))
     bep = os.path.join(a.server, 'BepInEx')
     actions = [('dir', os.path.join(a.bepinex_src, 'BepInEx'), bep),
                ('file', os.path.join(a.bepinex_src, 'winhttp.dll'), os.path.join(a.server, 'winhttp.dll')),
@@ -424,6 +472,14 @@ def cmd_report(a, st):
             rows.append((name, 'dry-run', ''))
         elif name == 'preflight':
             rows.append((name, '✅' if s['ok'] else '❌', '%d 件，风险 %s' % (s.get('pieces', 0), s.get('risk_level'))))
+        elif name == 'autosite':
+            if s.get('ok'):
+                q = s.get('stats') or {}
+                rows.append((name, '✅', '落点 (%s, %s) 高 %s，起伏 %.2fm / %d 样本'
+                             % (s.get('site_x'), s.get('site_z'), s.get('platform_y'),
+                                q.get('spread', 0), q.get('samples', 0))))
+            else:
+                rows.append((name, '❌', '无合格落点：%s' % s.get('rejects')))
         elif name == 'backup':
             rows.append((name, '✅' if s['ok'] else '❌', '`%s`' % s.get('dest', '')))
         elif name == 'install':
@@ -493,6 +549,11 @@ def main(argv=None):
     ap.add_argument('--radius', type=float, default=32.0, help='清理半径（默认 32）')
     ap.add_argument('--protect-x', type=float, help='保护圈中心 X（默认=落点外 43m）')
     ap.add_argument('--protect-z', type=float, help='保护圈中心 Z')
+    ap.add_argument('--site-margin', type=float, default=16.0, help='autosite 格子外扩（米，默认 16）')
+    ap.add_argument('--min-samples', type=int, default=8, help='autosite 每格最少样本数')
+    ap.add_argument('--max-spread', type=float, default=2.0, help='autosite 格内起伏上限（米）')
+    ap.add_argument('--water-level', type=float, default=30.0, help='海平面（默认 30）')
+    ap.add_argument('--top', type=int, default=10, help='autosite 输出前 N 个候选')
     ap.add_argument('--sink', type=float, help='对账用整体位移（默认取 run 段日志解析值）')
     ap.add_argument('--min-rate', type=float, default=1.0, help='对账达标线（默认 1.0=零丢失）')
     ap.add_argument('--margin', type=float, default=15.0)
@@ -514,6 +575,8 @@ def main(argv=None):
         ok = cmd_preflight(a, st)
     elif a.cmd == 'backup':
         ok = cmd_backup(a, st)
+    elif a.cmd == 'autosite':
+        ok = cmd_autosite(a, st)
     elif a.cmd == 'install':
         ok = cmd_install(a, st)
     elif a.cmd == 'run':
@@ -525,11 +588,15 @@ def main(argv=None):
     elif a.cmd == 'report':
         ok = cmd_report(a, st)
     else:  # all：逐段跑，失败的段重跑，已 ok 的跳过
-        need = {'preflight': ['--bp'], 'backup': ['--world'], 'install': ['--server', '--bepinex-src', '--plugin-dll', '--site-x', '--site-z', '--platform-y'],
+        need = {'preflight': ['--bp'], 'autosite': ['--world'], 'backup': ['--world'],
+                'install': ['--server', '--bepinex-src', '--plugin-dll'],
                 'run': ['--server'], 'verify': [], 'teardown': ['--server'], 'report': []}
         for name in STAGES:
             if st['stages'].get(name, {}).get('ok') and not st['stages'].get(name, {}).get('dry'):
                 print('· %s 已完成，跳过（删除 <work>/state.json 里该段可重跑）' % name)
+                continue
+            if name == 'autosite' and None not in (a.site_x, a.site_z, a.platform_y):
+                print('· 已显式给落点，跳过 autosite')
                 continue
             missing = [f for f in need[name] if getattr(a, f.lstrip('-').replace('-', '_')) is None]
             if missing:

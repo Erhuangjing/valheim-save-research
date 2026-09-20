@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.fch
+*.db2
+*.fwl
+*.fwl2
+*.chunk
+*.chunks
+*.ok
+*.zip
+.venv/

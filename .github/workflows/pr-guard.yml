@@ -1,0 +1,102 @@
+name: PR Guard
+
+# 目的（对应 2026-09-21 外部 agent 反馈的一个已知风险）：
+#   贡献方的沙箱环境在回合间会回到 `30427e4` 快照，远端追踪引用陈旧，
+#   若提交前没重新 fetch+reset，就会「打错基」——基于旧基线提交，
+#   表现为 diff 里混入不属于本次改动的文件、或把 main 上已有的内容当不存在。
+#   基错很难在 review 时肉眼发现，所以这里做成自动化检查。
+#
+# 另外顺手当质量门禁：四个工具都自带 --selftest，改动破坏工具时会在这里暴露。
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  base-check:
+    name: 基线检查（防打错基）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 检出基线信息
+        id: base
+        run: |
+          git fetch --no-tags origin main
+          MAIN=$(git rev-parse origin/main)
+          HEAD=$(git rev-parse HEAD)
+          BASE=$(git merge-base HEAD "$MAIN")
+          echo "main     = ${MAIN:0:8}"
+          echo "pr-head  = ${HEAD:0:8}"
+          echo "merge-base= ${BASE:0:8}"
+          echo "main_sha=$MAIN"   >> "$GITHUB_OUTPUT"
+          echo "base_sha=$BASE"   >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD"   >> "$GITHUB_OUTPUT"
+
+          # ① main 是否已包含在 PR 历史里（即 PR 是否基于 main 的最新状态）
+          if git merge-base --is-ancestor "$MAIN" "$HEAD"; then
+            echo "ahead_of_main=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ahead_of_main=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # ② PR 独有的提交数
+          echo "own_commits=$(git rev-list --count "$MAIN".."$HEAD")" >> "$GITHUB_OUTPUT"
+
+      - name: 报告基线状态
+        run: |
+          echo "### 基线检查" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 项 | 值 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| main | \`${{ steps.base.outputs.main_sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PR head | \`${{ steps.base.outputs.head_sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| merge-base | \`${{ steps.base.outputs.base_sha }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| PR 独有提交 | ${{ steps.base.outputs.own_commits }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 已跟上 main | ${{ steps.base.outputs.ahead_of_main }} |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 检测「打错基」征兆
+        if: steps.base.outputs.ahead_of_main == 'false'
+        run: |
+          echo "::warning title=PR 基线落后于 main::merge-base 不是当前 main 头。\
+          若你的工作区来自快照恢复，请先执行：git fetch origin && git reset --hard origin/<你的分支>"
+
+      - name: 检测异常大的删除量（基错的典型征兆）
+        run: |
+          git fetch --no-tags origin main
+          STAT=$(git diff --shortstat origin/main...HEAD)
+          echo "diffstat: $STAT"
+          DEL=$(echo "$STAT" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo 0)
+          echo "deletions=$DEL"
+          if [ "${DEL:-0}" -gt 200 ]; then
+            echo "::warning title=删除量偏大::本 PR 相对 main 删除了 ${DEL} 行。\
+            若这并非有意为之，很可能是在旧基线上提交导致 main 已有内容被回退。"
+          fi
+
+  selftest:
+    name: 四工具 selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: bp_parse
+        run: python tools/bp_parse.py --selftest
+
+      - name: bp_reconcile
+        run: python tools/bp_reconcile.py --selftest
+
+      - name: bp_autosite
+        run: python tools/bp_autosite.py --selftest
+
+      - name: bp_pipeline
+        run: python tools/bp_pipeline.py --selftest

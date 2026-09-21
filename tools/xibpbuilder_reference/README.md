@@ -12,6 +12,10 @@
 
 **编译状态**：2026-09-21 实机验证通过（.NET SDK 9.0.313 + Valheim dedicated server 1.0 + BepInEx 5，
 0 警告 0 错误，产物 `bin/Release/XiBpBuilder.dll` 28,672 字节；8 个协程状态机完整——见 PR #1 实测报告）。
+**运行状态**：隔离环境端到端实测通过（清障→落地→保存，1805/1805 零丢失、prefab 校验失败 0、
+坐标公式反推精确吻合）。运行期修掉三处：#7 `LoadPieces` uint32 hash 溢出（60.8% 的真实件超
+int32，原版第 0 步就崩）、#8 `AnchorSolveTask` NRE（null 碰撞体无保护 + 失败静默，现已显式
+报错并声明「自动求解未生效，回退 cfg 手填 YOffset」）、#9 GUID 脱敏副作用（cfg 不通用，见下）。
 初版有 4 处引用/using 层面的编译错误（41 处报错全是级联），已按 issue #2 修复：
 
 | # | 位置 | 修复 |
@@ -67,6 +71,20 @@
 
 `MeasureSinkToTerrain` / `IsMustDie` 里的 `LayerMask.GetMask(...)` 层名
 要对照 `WearNTear.UpdateSupport` 反编译里用的实际 mask（piece/Default/static_solid/Default_small/terrain）。
+
+## ⚠️ GUID 与 cfg（issue #9，部署前必读）
+
+BepInEx 按 **GUID** 决定 cfg 路径（`BepInEx/config/<GUID>.cfg`）。**本骨架 GUID 为
+`com.world.bpbuild`，与原版不同（脱敏改名），旧 cfg 不通用**——直接部署会新建一份全默认值的
+cfg，你调好的配置被完全绕开（实测症状：日志落点 = 代码默认值而非 cfg 值）。
+
+| 想用什么配置 | 怎么做 |
+|---|---|
+| 原版那份调好的 cfg | 把 `Plugin.cs` 的 `[BepInPlugin("...")]` GUID 改回原版值重编译；或把 cfg 文件改名为 `com.world.bpbuild.cfg` 并逐键核对 |
+| `bp_pipeline.py install` 生成的 cfg | 默认写 `com.world.bpbuild.cfg`；部署真版插件时传 `--cfg-guid <真版GUID>` |
+
+**YOffset 的地位（issue #8）**：锚点自动求解正常时保持 0；**若日志出现「[锚点] 求解失败 /
+自动求解未生效」，YOffset 必须手填**（0 = 贴地硬边界），cfg 注释里已带此提示。
 
 ## 构建（在配好引用的 Windows 机器上）
 

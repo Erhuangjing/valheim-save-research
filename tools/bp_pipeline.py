@@ -39,7 +39,7 @@ import bp_parse            # noqa: E402
 import bp_reconcile        # noqa: E402
 import bp_autosite         # noqa: E402
 
-CFG_GUID = 'com.world.bpbuild'          # 与 xibpbuilder_reference/Plugin.cs 的 BepInPlugin 一致
+CFG_GUID = 'com.world.bpbuild'          # 参考骨架的 BepInPlugin GUID；真版插件 GUID 不同（issue #9），用 --cfg-guid 指定
 FOUR_PIECE = ['winhttp.dll', 'doorstop_config.ini', 'doorstop_libs', 'BepInEx']
 STAGES = ['preflight', 'autosite', 'backup', 'install', 'run', 'verify', 'teardown', 'report']
 
@@ -227,11 +227,17 @@ def gen_cfg(p):
     L = []
     def sec(s, kv):
         L.append('[%s]' % s)
-        for k, v in kv:
-            L.append('%s = %s' % (k, v))
+        for it in kv:
+            if len(it) == 3:
+                L.append('## %s' % it[2])
+                L.append('%s = %s' % (it[0], it[1]))
+            else:
+                L.append('%s = %s' % (it[0], it[1]))
         L.append('')
     sec('Build', [('Enabled', 'true'), ('OriginX', p['site_x']), ('OriginZ', p['site_z']),
-                  ('YOffset', '0'), ('GroundLayerPy', p['ground_py']),
+                  ('YOffset', '0', '锚点自动求解生效时保持 0；若日志出现「[锚点] 求解失败/自动求解未生效」，'
+                                   '必须手填（0 = 贴地硬边界），issue #8'),
+                  ('GroundLayerPy', p['ground_py']),
                   ('AutoDetectGroundLayer', 'true'), ('PerPieceGround', 'false'),
                   ('Force', 'false'), ('Reconcile', 'true'),
                   ('BatchSize', '60'), ('FrameDelay', '10'), ('PieceFile', 'bp_pieces.txt')])
@@ -278,8 +284,8 @@ def cmd_install(a, st):
     if a.dry_run:
         for _, s, d in actions:
             print('[dry-run] %s → %s' % (s, d))
-        print('[dry-run] 写 cfg → %s（GroundLayerPy=%.2f）' % (os.path.join(bep, 'config', CFG_GUID + '.cfg'), params['ground_py']))
-        stage(st, 'install', ok=True, dry=True, params=params)
+        print('[dry-run] 写 cfg → %s（GroundLayerPy=%.2f）' % (os.path.join(bep, 'config', a.cfg_guid + '.cfg'), params['ground_py']))
+        stage(st, 'install', ok=True, dry=True, params=params, cfg_guid=a.cfg_guid)
         return True
     # 已有 BepInEx → 先隔离旧的（可回滚，不做不可逆删除）
     if os.path.exists(bep):
@@ -293,13 +299,13 @@ def cmd_install(a, st):
     for kind, s, d in actions:
         os.makedirs(os.path.dirname(d), exist_ok=True)
         (shutil.copytree if kind == 'dir' else shutil.copy2)(s, d)
-    with open(os.path.join(bep, 'config', CFG_GUID + '.cfg'), 'w', encoding='utf-8') as f:
+    with open(os.path.join(bep, 'config', a.cfg_guid + '.cfg'), 'w', encoding='utf-8') as f:
         f.write(gen_cfg(params))
     # 铁律 2：重跑 = 删 flag；本工具永不写 Force=true
     for fl in [f for f in os.listdir(os.path.join(bep, 'config')) if f.endswith('.flag')]:
         os.remove(os.path.join(bep, 'config', fl))
         print('  已清残留 flag: %s' % fl)
-    stage(st, 'install', ok=True, params=params, cfg=CFG_GUID + '.cfg')
+    stage(st, 'install', ok=True, params=params, cfg=a.cfg_guid + '.cfg')
     print('✓ install：四件套 + 插件 + bp_pieces.txt + cfg 就位（YOffset=0，Anchor 自动求解）')
     return True
 
@@ -602,6 +608,8 @@ def main(argv=None):
     ap.add_argument('--bepinex-src', help='BepInExPack_Valheim 解包目录（四件套来源）')
     ap.add_argument('--plugin-dll', help='编译好的 XiBpBuilder.dll')
     ap.add_argument('--bat', help='服务器启动脚本（默认 <server>/start_headless_server.bat）')
+    ap.add_argument('--cfg-guid', default=CFG_GUID, help='插件 BepInPlugin GUID（决定 cfg 文件名；'
+                       '用真版插件时传其 GUID，否则 cfg 读不到，issue #9）')
     ap.add_argument('--site-x', type=float, help='落点 X')
     ap.add_argument('--site-z', type=float, help='落点 Z')
     ap.add_argument('--platform-y', type=float, help='落点地表高度（cfg PlatformY）')

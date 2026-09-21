@@ -35,6 +35,9 @@ using UnityEngine;
 
 namespace XiBpBuilder
 {
+    // ⚠ issue #9：GUID 决定 cfg 路径（BepInEx/config/<GUID>.cfg）。本骨架 GUID 与原版不同
+    //（脱敏改名），旧 cfg 不通用。复用原版调好的 cfg：改回原 GUID 重编译，或把 cfg 文件
+    // 改名为本 GUID 并逐键核对。bp_pipeline.py install --cfg-guid <GUID> 可指定写哪份 cfg。
     [BepInPlugin("com.world.bpbuild", "XiBpBuilder", "0.31.1-ref")]   // REF: 版本号标 -ref 以示区分
     public class Plugin : BaseUnityPlugin
     {
@@ -406,38 +409,69 @@ namespace XiBpBuilder
         private IEnumerator AnchorSolveTask()
         {
             Log.LogInfo("[锚点] 求解开始（手术窗口内，磨损已冻）");
-            var our = CollectOurPieces();               // 落点 45m 内、带 mark 的 WearNTear 实例
-            if (our.Count == 0) { Log.LogWarning("[锚点] 拿不到实例，放弃"); yield break; }
-
+            // issue #8：失败必须可见。原版实现异常被吞、流程照走，表面「很成功」实则自动求解
+            // 没生效（实测靠 cfg 手填 YOffset 兜底）。现改为：异常显式报错 + 结尾明确
+            // 「自动求解未生效，已回退 cfg 手填 YOffset」，不让使用者误删手填参数。
             float totalShift = 0f;
+            bool failed = false;
             for (int round = 0; round < 3; round++)     // ✓DOC: 最多 3 轮闭环
             {
-                // 逐件求 d_i（复刻 WearNTear.UpdateSupport 845/870/902）
+                List<WearNTear> our = null;
                 var ds = new List<float>();
-                int mustDie = 0, anchor0 = 0;
-                foreach (var w in our)
+                int mustDie = 0, anchor0 = 0, noCol = 0;
+                float bestShift = 0f;
+                try
                 {
-                    var b = w.GetComponent<Collider>().bounds;
-                    float di = MeasureSinkToTerrain(b);        // ◐DOC: OverlapBox 下移命中 terrain
-                    if (di >= 0) ds.Add(di);
-                    if (IsMustDie(b)) mustDie++;               // ✓DOC: 盒内三者皆无 = 必死
-                    if (di <= 0.001f) anchor0++;               // 当前已接地
+                    our = CollectOurPieces();           // 每轮重收：位移/重实例化后旧实例会失效
+                    if (our.Count == 0) { Log.LogWarning("[锚点] 拿不到实例（mark 丢失或未实例化）"); failed = true; break; }
+                    ds = MeasureRound(our, out mustDie, out anchor0, out noCol);   // 逐件求 d_i
+                    // ✓DOC §8.3/§9.3 判据：选必死件最少的档，并列取更深
+                    bestShift = PickShiftByMustDie(our);    // ◐DOC: 扫 [-MaxShift,+MaxShift]，step SinkStep
+                }
+                catch (Exception e)
+                {
+                    Log.LogError($"[锚点] 第{round+1}轮测量异常：{e}");
+                    failed = true;
+                    break;
                 }
                 ds.Sort();
-                Log.LogInfo($"[锚点] 第{round+1}轮 必死={mustDie} 锚点={anchor0}");
-
-                // ✓DOC §8.3/§9.3 判据：选必死件最少的档，并列取更深
-                float bestShift = PickShiftByMustDie(our);     // ◐DOC: 扫 [-MaxShift,+MaxShift]，step SinkStep
+                Log.LogInfo($"[锚点] 第{round+1}轮 必死={mustDie} 锚点={anchor0} 无碰撞体跳过={noCol}");
                 if (Mathf.Approximately(bestShift, 0f) && mustDie == 0 && anchor0 >= CfgAnchorTarget.Value)
                 {
                     Log.LogInfo("[锚点] 已达标，停止");
                     break;
                 }
-                ApplyShift(our, bestShift);                    // ◐DOC: 整体位移（改 ZDO 位置）
+                try { ApplyShift(our, bestShift); }    // ◐DOC: 整体位移（改 ZDO 位置）
+                catch (Exception e) { Log.LogError($"[锚点] 位移异常：{e}"); failed = true; break; }
                 totalShift += bestShift;
-                yield return new WaitForSeconds(0.5f);         // REF: 等物理/几何更新
+                yield return new WaitForSeconds(0.5f); // REF: 等物理/几何更新（yield 必须在 try 外：迭代器语法限制）
             }
-            Log.LogInfo($"★ [锚点] 求解结束：累计位移 {totalShift:F2}m");
+            if (failed)
+                Log.LogWarning($"[锚点] ★ 自动求解未生效 —— YOffset 沿用 cfg 手填值 {CfgYOffset.Value}；"
+                    + "若为 0 则整栋按贴地硬边界落地，请按实测手调（issue #8）");
+            else
+                Log.LogInfo($"★ [锚点] 求解结束：累计位移 {totalShift:F2}m");
+        }
+
+        // issue #8：测量段拆成无 yield 的普通方法（迭代器的 try/catch 内不许 yield），
+        // 并对「无 Collider / 已销毁」的件免疫——这正是实测 NRE 的元凶：
+        // CollectOurPieces 只碰 ZNetView 能活着返回，一进测量循环 GetComponent<Collider>().bounds 就炸。
+        private List<float> MeasureRound(List<WearNTear> our, out int mustDie, out int anchor0, out int noCollider)
+        {
+            var ds = new List<float>();
+            mustDie = anchor0 = noCollider = 0;
+            foreach (var w in our)
+            {
+                if (w == null) { noCollider++; continue; }          // Unity 已销毁（== 重载判真）
+                var col = w.GetComponent<Collider>();
+                if (col == null) { noCollider++; continue; }        // 碰撞体在子物体/缺失 → 原版在此 NRE
+                var b = col.bounds;
+                float di = MeasureSinkToTerrain(b);        // ◐DOC: OverlapBox 下移命中 terrain
+                if (di >= 0) ds.Add(di);
+                if (IsMustDie(b)) mustDie++;               // ✓DOC: 盒内三者皆无 = 必死
+                if (di <= 0.001f) anchor0++;               // 当前已接地
+            }
+            return ds;
         }
 
         // ✓DOC: OverlapBox(中心下移 d, size/2 + 0.15) 命中 terrain 层
@@ -526,21 +560,35 @@ namespace XiBpBuilder
             var list = new List<Piece>();
             string path = Path.Combine(Paths.ConfigPath, CfgPieceFile.Value);   // REF: BepInEx/config
             if (!File.Exists(path)) { Log.LogError($"件清单不存在: {path}"); return list; }
+            int line = 0;
             foreach (var raw in File.ReadAllLines(path))
             {
+                line++;
                 var s = raw.Trim();
                 if (s.Length == 0 || s.StartsWith("#")) continue;
                 var f = s.Split('|');
                 if (f.Length < 6) continue;
-                var pc = new Piece {
-                    name = f[0],
-                    hash = int.Parse(f[1], CultureInfo.InvariantCulture),
-                    x = float.Parse(f[2], CultureInfo.InvariantCulture),
-                    y = float.Parse(f[3], CultureInfo.InvariantCulture),
-                    z = float.Parse(f[4], CultureInfo.InvariantCulture),
-                };
-                float yaw = float.Parse(f[5], CultureInfo.InvariantCulture);
-                pc.rot = Quaternion.Euler(0f, yaw, 0f);   // REF: txt 只有 yaw；升级请改吃 bp_parse.py --json 的四元数
+                Piece pc;
+                try
+                {
+                    pc = new Piece {
+                        name = f[0],
+                        // issue #7：prefab hash 是 uint32——真实蓝图里 60.8% 的件超过 int32 上限，
+                        // int.Parse 直接 OverflowException（第 0 步就崩）。Valheim 的 prefab API
+                        // （GetPrefab/SetPrefab）用 int 存 uint32 位模式 → unchecked 保位转换。
+                        hash = unchecked((int)uint.Parse(f[1], CultureInfo.InvariantCulture)),
+                        x = float.Parse(f[2], CultureInfo.InvariantCulture),
+                        y = float.Parse(f[3], CultureInfo.InvariantCulture),
+                        z = float.Parse(f[4], CultureInfo.InvariantCulture),
+                    };
+                    float yaw = float.Parse(f[5], CultureInfo.InvariantCulture);
+                    pc.rot = Quaternion.Euler(0f, yaw, 0f);   // REF: txt 只有 yaw；升级请改吃 bp_parse.py --json 的四元数
+                }
+                catch (Exception e)
+                {
+                    Log.LogError($"[清单] 第 {line} 行解析失败，跳过: {raw} ({e.Message})");
+                    continue;
+                }
                 list.Add(pc);
             }
             return list;
@@ -608,6 +656,7 @@ namespace XiBpBuilder
         {
             foreach (var w in our)
             {
+                if (w == null) continue;                            // issue #8：已销毁件跳过
                 var nv = w.GetComponent<ZNetView>(); if (nv==null||!nv.IsValid()) continue;
                 var z = nv.GetZDO(); Vector3 p = z.GetPosition();
                 z.SetPosition(new Vector3(p.x, p.y + dy, p.z));
@@ -621,7 +670,10 @@ namespace XiBpBuilder
                 int die = 0;
                 foreach (var w in our)
                 {
-                    var b = w.GetComponent<Collider>().bounds;
+                    if (w == null) { die++; continue; }             // 无法测量按必死计（保守）
+                    var col = w.GetComponent<Collider>();
+                    if (col == null) { die++; continue; }           // issue #8：同 MeasureRound 的 null 免疫
+                    var b = col.bounds;
                     b.center += Vector3.up * d;   // 试位移后
                     if (IsMustDie(b)) die++;
                 }

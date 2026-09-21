@@ -401,5 +401,9 @@ instance.StartCoroutine((IEnumerator)m.Invoke(ZNet.instance, new object[]{ true 
 - `README.md` —— 免责声明 + 构建指引 + 已知编译错误对照
 
 原版真身（约 1500 行）未包含在本仓库；参考骨架已于 2026-09-21 实机编译验证通过
-（.NET SDK 9 + DS 1.0 + BepInEx 5，0 警告 0 错误，见 PR #1 实测报告 / issue #2）。
+（.NET SDK 9 + DS 1.0 + BepInEx 5，0 警告 0 错误，见 PR #1 实测报告 / issue #2），
+并在隔离环境完成端到端实测：**清障→落地→保存 1805/1805 零丢失、prefab 校验失败 0、
+坐标公式反推精确吻合**（run/teardown 段）。实测暴露并已修三处运行期问题：
+#7 hash 按 uint32 位模式解析（int.Parse 溢出）、#8 锚点求解 null 保护 + 失败显式化、
+#9 GUID 变更致 cfg 不通用（见参考 README「GUID 与 cfg」）。
 编译通过只覆盖「直接调用的成员」；`AccessTools` 反射字符串编译期不检查，运行时行为仍须实测。

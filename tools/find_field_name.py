@@ -1,7 +1,32 @@
 # -*- coding: utf-8 -*-
 """从游戏程序集反查字段哈希名 + 全量扫 portal（candidates 法，不依赖 walk）"""
 import os, sys, re, struct, json
-sys.path.insert(0, r'E:/wkbdfile/2026-08-17-16-03-22/ref')
+
+# ── issue #6：路径解析 ──────────────────────────────────────────────
+# 仓库内资源自动定位；外部路径走环境变量（缺省时报错清晰，不再硬编码本机路径）
+#   VH_WORLD_ROOT  worlds_local 根目录
+#   VH_WORLD       单个世界目录（含 .chunk / .chunks）
+#   VH_SERVER      Valheim dedicated server 安装目录
+#   VH_BACKUP      备份输入/输出根目录
+HERE = os.path.dirname(os.path.abspath(__file__))          # tools/
+ROOT = os.path.dirname(HERE)                               # 仓库根
+HASHLIB = os.path.join(ROOT, 'format', 'prefab-hashlib.json')
+WORLD_ROOT = os.environ.get('VH_WORLD_ROOT')
+WORLD_DIR = os.environ.get('VH_WORLD')
+SERVER_DIR = os.environ.get('VH_SERVER')
+BACKUP_DIR = os.environ.get('VH_BACKUP')
+
+
+def need(var, val, hint):
+    """外部路径缺省时给清晰报错，而不是抛莫名的 FileNotFoundError"""
+    if not val:
+        raise SystemExit(
+            '✗ 需要设置环境变量 %s（%s）\n'
+            '  例：export %s="<你的路径>"'
+            % (var, hint, var))
+    return val
+# ────────────────────────────────────────────────────────────────────
+sys.path.insert(0, HERE)
 
 def stable_hash(s):
     h1 = h2 = 5381
@@ -14,8 +39,8 @@ def stable_hash(s):
 
 WANT = {0xa996a82a: '?int字段?', 0x2faea12f: '?str字段?', 0x34831ea2: 'creator'}
 DLLS = [
-    r'D:/SteamLibrary/steamapps/common/Valheim dedicated server/valheim_server_Data/Managed/assembly_valheim.dll',
-    r'D:/SteamLibrary/steamapps/common/Valheim/valheim_Data/Managed/assembly_valheim.dll',
+    os.path.join(need('VH_SERVER', SERVER_DIR, 'dedicated server 安装目录'), 'valheim_server_Data/Managed/assembly_valheim.dll'),
+    os.path.join(need('VH_SERVER', SERVER_DIR, 'dedicated server 安装目录'), 'valheim_server_Data/Managed/assembly_valheim.dll'),
 ]
 print('=== 从程序集反查字段名 ===')
 done = False
@@ -37,12 +62,12 @@ for dll in DLLS:
 
 print('\n=== 全量扫 portal（candidates 法）===')
 H = {}
-with open(r'E:/wkbdfile/2026-08-17-16-03-22/ref/hashlib.json', encoding='utf-8') as f:
+with open(HASHLIB, encoding='utf-8') as f:
     H = {int(k): v for k, v in json.load(f).items()}
 PORTAL = [h for h, n in H.items() if n == 'portal_wood'][0]
 print('  portal_wood = 0x%08x' % PORTAL)
 
-SRC = r'D:/SteamLibrary/steamapps/common/Valheim dedicated server/save/worlds_local/WORLD'
+SRC = need('VH_WORLD', WORLD_DIR, '世界存档目录（含 .chunk）')
 pat = struct.pack('<I', PORTAL)
 rows = []
 for cf in sorted(f for f in os.listdir(SRC) if f.endswith('.chunk')):

@@ -2,7 +2,32 @@
 """解压 _main.xx.db2（ZDO 数据库）并在其中定位地形记录"""
 import os, struct, json, zlib, collections
 
-CACHE = r'E:/wkbdfile/2026-08-17-16-03-22/ref/hashlib.json'
+
+# ── issue #6：路径解析 ──────────────────────────────────────────────
+# 仓库内资源自动定位；外部路径走环境变量（缺省时报错清晰，不再硬编码本机路径）
+#   VH_WORLD_ROOT  worlds_local 根目录
+#   VH_WORLD       单个世界目录（含 .chunk / .chunks）
+#   VH_SERVER      Valheim dedicated server 安装目录
+#   VH_BACKUP      备份输入/输出根目录
+HERE = os.path.dirname(os.path.abspath(__file__))          # tools/
+ROOT = os.path.dirname(HERE)                               # 仓库根
+HASHLIB = os.path.join(ROOT, 'format', 'prefab-hashlib.json')
+WORLD_ROOT = os.environ.get('VH_WORLD_ROOT')
+WORLD_DIR = os.environ.get('VH_WORLD')
+SERVER_DIR = os.environ.get('VH_SERVER')
+BACKUP_DIR = os.environ.get('VH_BACKUP')
+
+
+def need(var, val, hint):
+    """外部路径缺省时给清晰报错，而不是抛莫名的 FileNotFoundError"""
+    if not val:
+        raise SystemExit(
+            '✗ 需要设置环境变量 %s（%s）\n'
+            '  例：export %s="<你的路径>"'
+            % (var, hint, var))
+    return val
+# ────────────────────────────────────────────────────────────────────
+CACHE = HASHLIB
 with open(CACHE, encoding='utf-8') as f:
     HSLIB = {int(k): v for k, v in json.load(f).items()}
 
@@ -12,7 +37,7 @@ TARGETS = {
     'LevelTerrain': 0xdf8de8c9,
     'ZoneCtrl': 0x7988b013,
 }
-BASE = r'D:/SteamLibrary/steamapps/common/Valheim dedicated server/save/worlds_local'
+BASE = need('VH_WORLD_ROOT', WORLD_ROOT, 'worlds_local 根目录')
 DIRS = {
     '20:39': 'WORLD_backup_auto-20260916-203929',
     '22:46': 'WORLD_backup_auto-20260916-224637',

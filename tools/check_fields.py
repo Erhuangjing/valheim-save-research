@@ -1,9 +1,34 @@
 # -*- coding: utf-8 -*-
 """算候选字段名的 stable_hash + dump 各 portal 的字段值对比"""
 import os, sys, struct
-sys.path.insert(0, r'E:/wkbdfile/2026-08-17-16-03-22/ref')
+sys.path.insert(0, HERE)
 from zdo_lib import hs, walk
 
+
+# ── issue #6：路径解析 ──────────────────────────────────────────────
+# 仓库内资源自动定位；外部路径走环境变量（缺省时报错清晰，不再硬编码本机路径）
+#   VH_WORLD_ROOT  worlds_local 根目录
+#   VH_WORLD       单个世界目录（含 .chunk / .chunks）
+#   VH_SERVER      Valheim dedicated server 安装目录
+#   VH_BACKUP      备份输入/输出根目录
+HERE = os.path.dirname(os.path.abspath(__file__))          # tools/
+ROOT = os.path.dirname(HERE)                               # 仓库根
+HASHLIB = os.path.join(ROOT, 'format', 'prefab-hashlib.json')
+WORLD_ROOT = os.environ.get('VH_WORLD_ROOT')
+WORLD_DIR = os.environ.get('VH_WORLD')
+SERVER_DIR = os.environ.get('VH_SERVER')
+BACKUP_DIR = os.environ.get('VH_BACKUP')
+
+
+def need(var, val, hint):
+    """外部路径缺省时给清晰报错，而不是抛莫名的 FileNotFoundError"""
+    if not val:
+        raise SystemExit(
+            '✗ 需要设置环境变量 %s（%s）\n'
+            '  例：export %s="<你的路径>"'
+            % (var, hint, var))
+    return val
+# ────────────────────────────────────────────────────────────────────
 def stable_hash(s):
     h1 = h2 = 5381
     for i in range(0, len(s), 2):
@@ -30,7 +55,7 @@ for t in TARGETS:
 
 print('\n=== 各 portal 记录的字段区对比 ===')
 H = hs()
-SRC = r'D:/SteamLibrary/steamapps/common/Valheim dedicated server/save/worlds_local/WORLD'
+SRC = need('VH_WORLD', WORLD_DIR, '世界存档目录（含 .chunk）')
 PORTAL = [h for h, n in H.items() if n == 'portal_wood'][0]
 for cf in sorted(f for f in os.listdir(SRC) if f.endswith('.chunk')):
     try:

@@ -181,4 +181,4 @@ flags    pos (-845.9, 13.6, -26.4)             prefab        短字段   cnt+字
 1. **穷举结构搜索**：不靠猜测，枚举 `[flags][...][hash]` 的各种排列，用"hash 命中已知名字库"当强判据（随机基线 1.34e-05）→ 一次定出真实结构
 2. **长度自洽检验**：按规范解码，要求"消耗字节数 == 到下一条记录起点的距离"
 3. **分组归因**：对不吻合的记录按 flags / prefab 分组，找出残余变量
-4. 脚本留存于 `E:\wkbdfile\2026-08-17-16-03-22\ref\`（`zdo_struct_search.py` / `zdo_v10.py` / `zdo_walk.py`）
+4. 脚本留存于 `tools/`（`zdo_struct_search.py` / `zdo_v10.py` / `zdo_walk.py`）

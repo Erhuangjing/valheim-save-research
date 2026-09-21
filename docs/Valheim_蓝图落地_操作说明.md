@@ -8,7 +8,7 @@
 
 ### 1️⃣ 双击 `start_headless_server.bat` 起服
 
-位置：`D:\SteamLibrary\steamapps\common\Valheim dedicated server\start_headless_server.bat`
+位置：`<VALHEIM_SERVER_DIR>\start_headless_server.bat`
 
 启动脚本里已经配好：世界 `WORLD`、端口 `2456`、密码 `<REDACTED_PASSWORD>`、矿石过门 + 死亡保留装备。
 
@@ -56,7 +56,7 @@ Valheim 的服务器**只加载玩家附近的区域**（zone）。插件要在�
 ## 三、怎么看进度？看这个日志文件
 
 ```
-D:\SteamLibrary\steamapps\common\Valheim dedicated server\BepInEx\config\bpbuild.log
+<VALHEIM_SERVER_DIR>\BepInEx\config\bpbuild.log
 ```
 
 正常的话会依次出现：
@@ -91,7 +91,7 @@ D:\SteamLibrary\steamapps\common\Valheim dedicated server\BepInEx\config\bpbuild
 
 ## 五、想调参数？改配置文件后重启服务器
 
-文件：`D:\SteamLibrary\steamapps\common\Valheim dedicated server\BepInEx\config\com.world.bpbuild.cfg`
+文件：`<VALHEIM_SERVER_DIR>\BepInEx\config\com.world.bpbuild.cfg`
 
 | 配置项                        | 当前值            | 说明                                  |
 | -------------------------- | -------------- | ----------------------------------- |
@@ -117,7 +117,7 @@ save\worlds_local\
 
 | 备份                                                                                                | 内容                                   |
 | ------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `E:\wkbdfile\2026-08-17-16-03-22\Valheim_WORLD_backup_20260912\before_plugin_20260914-193048\` | **本次操作前的状态**（插件落地前，含你自己玩到 19:30 的进度） |
+| `<BACKUP_DIR>\before_plugin_20260914-193048\` | **本次操作前的状态**（插件落地前，含你自己玩到 19:30 的进度） |
 | `...\pre_official_land_20260914-191147\`                                                          | 我在里面插入过蓝图之前的状态                       |
 | `...\pre_restart_20260913-205613\`                                                                | 更早的 09-13 快照                         |
 

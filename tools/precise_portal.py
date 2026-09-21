@@ -1,7 +1,32 @@
 # -*- coding: utf-8 -*-
 """精确提取每条 portal 的 tag（按 tag hash 定位）+ 检查插入点上下文"""
 import os, sys, struct, json
-sys.path.insert(0, r'E:/wkbdfile/2026-08-17-16-03-22/ref')
+
+# ── issue #6：路径解析 ──────────────────────────────────────────────
+# 仓库内资源自动定位；外部路径走环境变量（缺省时报错清晰，不再硬编码本机路径）
+#   VH_WORLD_ROOT  worlds_local 根目录
+#   VH_WORLD       单个世界目录（含 .chunk / .chunks）
+#   VH_SERVER      Valheim dedicated server 安装目录
+#   VH_BACKUP      备份输入/输出根目录
+HERE = os.path.dirname(os.path.abspath(__file__))          # tools/
+ROOT = os.path.dirname(HERE)                               # 仓库根
+HASHLIB = os.path.join(ROOT, 'format', 'prefab-hashlib.json')
+WORLD_ROOT = os.environ.get('VH_WORLD_ROOT')
+WORLD_DIR = os.environ.get('VH_WORLD')
+SERVER_DIR = os.environ.get('VH_SERVER')
+BACKUP_DIR = os.environ.get('VH_BACKUP')
+
+
+def need(var, val, hint):
+    """外部路径缺省时给清晰报错，而不是抛莫名的 FileNotFoundError"""
+    if not val:
+        raise SystemExit(
+            '✗ 需要设置环境变量 %s（%s）\n'
+            '  例：export %s="<你的路径>"'
+            % (var, hint, var))
+    return val
+# ────────────────────────────────────────────────────────────────────
+sys.path.insert(0, HERE)
 
 TAG_HASH = 0x297c91ea      # stable_hash("tag")
 CRE_HASH = 0x34831ea2      # stable_hash("creator")
@@ -9,11 +34,11 @@ STR1_HASH = 0x2faea12f
 INT_HASH = 0xa996a82a
 
 H = {}
-with open(r'E:/wkbdfile/2026-08-17-16-03-22/ref/hashlib.json', encoding='utf-8') as f:
+with open(HASHLIB, encoding='utf-8') as f:
     H = {int(k): v for k, v in json.load(f).items()}
 PORTAL = [h for h, n in H.items() if n == 'portal_wood'][0]
 
-SRC = r'D:/SteamLibrary/steamapps/common/Valheim dedicated server/save/worlds_local/WORLD'
+SRC = need('VH_WORLD', WORLD_DIR, '世界存档目录（含 .chunk）')
 pat = struct.pack('<I', PORTAL)
 tagpat = struct.pack('<I', TAG_HASH)
 crepat = struct.pack('<I', CRE_HASH)

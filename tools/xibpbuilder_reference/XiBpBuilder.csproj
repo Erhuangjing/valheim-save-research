@@ -1,0 +1,61 @@
+<!-- REF: 工程文件按交接文档 §2.2（netstandard2.1 + .NET SDK 9）重建。
+     引用清单 = 7 个程序集（issue #2 实测补齐；原版只列 4 个导致 77×CS0012 级联）。 -->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>XiBpBuilder</AssemblyName>
+    <RootNamespace>XiBpBuilder</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <!-- 部署到专用服务器 BepInEx\plugins\ -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+  </PropertyGroup>
+
+  <!--
+    ⚠️ 7 个引用的 HintPath 都是占位符，构建前按本机安装位置改：
+      Managed = <服务器>\valheim_server_Data\Managed\（游戏本体则 valheim_Data\Managed\）
+      Core    = <服务器>\BepInEx\core\
+    为什么必须 7 个（缺任何一个的典型症状，issue #2 实测）：
+      UnityEngine            —— MonoBehaviour 定义在这里，不在 CoreModule！
+                               缺 → 全文件 77× CS0012「MonoBehaviour 在未引用的程序集中定义」
+      UnityEngine.CoreModule —— Vector3 / Quaternion / Mathf / Time
+      UnityEngine.PhysicsModule —— Physics.OverlapBox（锚点求解 d_i / 必死件判据）
+      assembly_valheim       —— ZDO / ZNet / ZNetScene / WearNTear / TerrainComp / Heightmap
+      assembly_utils         —— ZPackage / Utils（1.0 起从主程序集拆出）
+      BepInEx                —— BaseUnityPlugin / ConfigEntry / Paths
+      0Harmony               —— Harmony / HarmonyPatch
+    本仓库不含这些二进制（.gitignore 排除）。
+  -->
+  <ItemGroup>
+    <Reference Include="assembly_valheim">
+      <HintPath>REPLACE_ME\valheim_server_Data\Managed\assembly_valheim.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="assembly_utils">
+      <HintPath>REPLACE_ME\valheim_server_Data\Managed\assembly_utils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>REPLACE_ME\valheim_server_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>REPLACE_ME\valheim_server_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>REPLACE_ME\valheim_server_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>REPLACE_ME\BepInEx\core\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>REPLACE_ME\BepInEx\core\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

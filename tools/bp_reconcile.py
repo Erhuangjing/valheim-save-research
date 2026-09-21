@@ -110,13 +110,19 @@ def scan_chunks_for_hashes(world_dir, hashes):
 
 
 def full_scan(world_dir, hslib):
-    """全景模式：逐字节启发式扫所有记录（慢，仅供 识别率/全景 观察）。"""
+    """全景模式：逐字节启发式扫所有记录。
+
+    ⚠️ 观察用，不可用于验收（issue #5）：启发式要求 hash 在名字表里，实测识别率
+    ≈99.8%（259,823/260,459），会漏「名字表未收录」的合法记录与个别 flags 组合，
+    造成验收假阴性。验收走 scan_chunks_for_hashes（hash 定向，不受名字表影响）
+    + identity_check / precise_scan（索引恒等式与逐 chunk 计数核对）。
+    """
     records = []
     for fn in sorted(f for f in os.listdir(world_dir) if f.endswith('.chunk')):
         with open(os.path.join(world_dir, fn), 'rb') as f:
             data = f.read()
         n = len(data)
-        for p in range(0, n - 18):
+        for p in range(6, n - 18):          # 6B 头 [ver u16][count i32] 之后才是记录流
             fl, = struct.unpack_from('<H', data, p)
             if not (fl & 0x0100) or (fl & 0x8000):
                 continue
@@ -127,6 +133,84 @@ def full_scan(world_dir, hslib):
             if _sane(x, y, z):
                 records.append((ph, x, y, z))
     return records
+
+
+# ---------------------------------------------------------------- 索引恒等式与精确扫描（issue #5）
+def index_total(world_dir):
+    """读 _main.<N>.chunks 索引头部 → (ver, total_zdo, zone_count)；无索引返回 None。
+
+    布局（chunks_index.py 实测）：[ver u16][total u32][zone 数 u32] + zone 条目。
+    """
+    idx = sorted(f for f in os.listdir(world_dir) if f.endswith('.chunks'))
+    if not idx:
+        return None
+    with open(os.path.join(world_dir, idx[0]), 'rb') as f:
+        b = f.read(10)
+    if len(b) < 10:
+        return None
+    ver, total, n = struct.unpack_from('<HII', b, 0)
+    return ver, total, n
+
+
+def chunk_counts(world_dir):
+    """各 .chunk 文件头 [WorldVersion u16][ZDO count i32] 的记录数。"""
+    out = {}
+    for fn in sorted(f for f in os.listdir(world_dir) if f.endswith('.chunk')):
+        with open(os.path.join(world_dir, fn), 'rb') as f:
+            hdr = f.read(6)
+        out[fn] = struct.unpack_from('<i', hdr, 2)[0] if len(hdr) >= 6 else None
+    return out
+
+
+def identity_check(world_dir):
+    """验收前置恒等式：sum(各 chunk 头计数) == 索引 total。
+
+    实测该恒等式在精确解析下成立（260,459 == 260,459）。返回
+    {'index': total 或 None, 'chunk_sum': sum, 'ok': True/False/None(无索引无法判定)}。
+    """
+    idx = index_total(world_dir)
+    counts = chunk_counts(world_dir)
+    s = sum(c for c in counts.values() if c is not None)
+    return {'index': idx[1] if idx else None, 'chunk_sum': s,
+            'zones': len(counts), 'ok': (idx[1] == s) if idx else None}
+
+
+def precise_scan(world_dir):
+    """精确扫描（验收级）：锚点启发式去掉「hash 在名字表」过滤 + 逐 chunk 计数核对。
+
+    与 full_scan 的差异：不查名字表 → 「表未收录 hash」的合法记录也能读出；
+    并用 chunk 头计数核对每个文件是否「找齐」（found == header count）。
+    返回 {'records': [(hash,x,y,z)], 'per_chunk': [{file,want,found,exact}],
+          'found': 总命中, 'want': 总应查, 'exact_chunks': n}。
+    仍非逐段解析（变长段未解码），flags 组合类漏检以 found<want 形式暴露，不隐藏。
+    """
+    records, per_chunk = [], []
+    for fn in sorted(f for f in os.listdir(world_dir) if f.endswith('.chunk')):
+        with open(os.path.join(world_dir, fn), 'rb') as f:
+            data = f.read()
+        want = struct.unpack_from('<i', data, 2)[0] if len(data) >= 6 else None
+        n = len(data)
+        found = 0
+        for p in range(6, n - 18):          # 跳过 6B 头
+            fl, = struct.unpack_from('<H', data, p)
+            if not (fl & 0x0100) or (fl & 0x8000):
+                continue
+            x, y, z = struct.unpack_from('<fff', data, p + 2)
+            if not _sane(x, y, z):
+                continue
+            # 反假阳性（0 填充/跨字段误读）：真实 ZDO 的世界坐标不会是退化值，hash 不会为 0
+            if abs(x) < 1e-6 or abs(z) < 1e-6:
+                continue
+            h, = struct.unpack_from('<I', data, p + 14)
+            if h == 0:
+                continue
+            records.append((h, x, y, z))
+            found += 1
+        per_chunk.append({'file': fn, 'want': want, 'found': found,
+                          'exact': (want is not None and found == want)})
+    return {'records': records, 'per_chunk': per_chunk,
+            'found': len(records), 'want': sum(c['want'] or 0 for c in per_chunk),
+            'exact_chunks': sum(1 for c in per_chunk if c['exact'])}
 
 
 # ---------------------------------------------------------------- 对账
@@ -180,9 +264,8 @@ def verdict(res, min_rate):
 
 # ---------------------------------------------------------------- 自检
 def _synth_chunk(path, recs):
-    """合成 1.0 chunk 文件：16B 头（offset2=int32 记录数）+ 记录 + 段字节。"""
-    hdr = bytearray(16)
-    struct.pack_into('<i', hdr, 2, len(recs))
+    """合成 1.0 chunk 文件：6B 头 [WorldVersion u16=41][count i32]（真实格式，§2.1）+ 记录流。"""
+    hdr = bytearray(struct.pack('<Hi', 41, len(recs)))
     out = bytes(hdr)
     for h, x, y, z in recs:
         out += struct.pack('<HfffI', 0x0104, x, y, z, h)   # flags=0x0104（有位置+V3 段）
@@ -234,12 +317,28 @@ def selftest():
     full = full_scan(world3, hslib)
     okC = rC['extra_in_bbox_total'] == 0 and len(full) == 41
 
+    # D（issue #5）：未收录 hash 的记录 full_scan 漏 / precise_scan 命中 / 索引恒等式成立
+    world4 = os.path.join(tmp, 'W4'); os.makedirs(world4)
+    _synth_chunk(os.path.join(world4, '_main.0.chunk'),
+                 [(0xDEADBEEF, 1.0, 40.0, 2.0)] + recs_of(exp[:3]))   # 0xDEADBEEF 不在哈希库
+    with open(os.path.join(world4, '_main.0.chunks'), 'wb') as f:
+        f.write(struct.pack('<HII', 41, 4, 1) + b'\x00\x00\x00\x00')
+    ident = identity_check(world4)
+    prec = precise_scan(world4)
+    fulln = len(full_scan(world4, hslib))
+    okD = (ident['ok'] is True and ident['index'] == 4
+           and len(prec['records']) == 4 and prec['per_chunk'][0]['exact']
+           and fulln == 3)
+
     print('A 全量对账      : matched=%d missing=%d → %s' % (rA['matched'], rA['missing'], 'PASS' if okA else 'FAIL'))
     print('B 缺失+y漂移0.30: matched=%d missing=%d extras=%d → %s'
           % (rB['matched'], rB['missing'], rB['extra_in_bbox_total'], 'PASS' if okB else 'FAIL'))
     print('C 盒外干扰+全景 : extras=%d 全景记录=%d → %s' % (rC['extra_in_bbox_total'], len(full), 'PASS' if okC else 'FAIL'))
-    ok = okA and okB and okC
-    print('selftest:', '19/19 风格三案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
+    print('D 精确vs全景    : 恒等式%s precise=%d/%d exact=%s full=%d → %s'
+          % ('✓' if ident['ok'] else '✗', prec['found'], prec['want'],
+             prec['per_chunk'][0]['exact'], fulln, 'PASS' if okD else 'FAIL'))
+    ok = okA and okB and okC and okD
+    print('selftest:', '四案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
     return 0 if ok else 1
 
 
@@ -256,7 +355,7 @@ def main(argv=None):
     ap.add_argument('--sink', type=float, default=0.0, help='锚点求解最终整体位移（有符号，下沉为负）')
     ap.add_argument('--min-rate', type=float, default=1.0, help='达标线（默认 1.0 = 零丢失）')
     ap.add_argument('--margin', type=float, default=15.0, help='extras 判定包围盒外扩（米）')
-    ap.add_argument('--full-scan', action='store_true', help='附加逐字节全景扫描（慢）')
+    ap.add_argument('--full-scan', action='store_true', help='附加全景扫描（观察用，不可用于验收：识别率≈99.8%，见 full_scan 文档）')
     ap.add_argument('--out', help='结果 JSON 输出路径')
     ap.add_argument('--selftest', action='store_true')
     a = ap.parse_args(argv)
@@ -276,14 +375,33 @@ def main(argv=None):
             'x': (min(p['x'] for p in pcs) + max(p['x'] for p in pcs)) / 2,
             'z': (min(p['z'] for p in pcs) + max(p['z'] for p in pcs)) / 2}
 
+    # 验收前置（issue #5）：索引恒等式不成立 → 存档损坏/解析失配，拒绝出存活率
+    ident = identity_check(a.world)
+    if ident['ok'] is False:
+        print('✗ 验收前置检查失败：索引 total=%s ≠ 各 chunk 头计数之和=%s —— '
+              '存档可能损坏或布局版本不匹配，拒绝输出存活率（宁可拒绝，不出可疑数字）'
+              % (ident['index'], ident['chunk_sum']))
+        return 2
+    if ident['ok'] is True:
+        print('✓ 索引恒等式：各 chunk 计数之和 == 索引 total == %d（%d 个 zone）'
+              % (ident['index'], ident['zones']))
+
     exp = transform_pieces(manifest, a.origin_x, a.origin_z, a.platform_y,
                            a.ground_py, a.yoffset, a.sink)
     found, chunk_files = scan_chunks_for_hashes(a.world, {e['hash'] for e in exp})
     res = reconcile(exp, found, a.margin)
+    res['identity'] = ident
     if a.full_scan:
+        if a.min_rate >= 1.0:
+            print('⚠ full_scan 为观察用（识别率≈99.8%，不可用于验收）；verdict 走 hash 定向扫描，不受影响')
         hslib = load_hashlib()
+        prec = precise_scan(a.world)
         res['full_scan_records'] = len(full_scan(a.world, hslib))
+        res['precise_scan'] = {k: prec[k] for k in ('found', 'want', 'exact_chunks')}
         res['chunk_files'] = chunk_files
+        print('全景（观察用）: full_scan=%d precise=%d/%d exact_chunks=%d/%d'
+              % (res['full_scan_records'], prec['found'], prec['want'],
+                 prec['exact_chunks'], len(prec['per_chunk'])))
     res['transform'] = {'origin': [a.origin_x, a.origin_z], 'platform_y': a.platform_y,
                         'ground_py': a.ground_py, 'yoffset': a.yoffset, 'sink': a.sink}
     res['pass'] = verdict(res, a.min_rate)

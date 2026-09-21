@@ -397,8 +397,9 @@ instance.StartCoroutine((IEnumerator)m.Invoke(ZNet.instance, new object[]{ true 
 `tools/xibpbuilder_reference/`（本轮从上述实验日志重建）：
 
 - `Plugin.cs` —— 七段编排 + 4 个 Harmony patch 的参考骨架
-- `XiBpBuilder.csproj` —— netstandard2.1 工程
-- `README.md` —— **免责声明：这是从实验日志重建的参考实现，不是原版 v0.31.1（1500 行，在用户机器上），
-  本沙箱无法编译验证；所有反射签名（私有字段/方法名）部署前必须对 `assembly_valheim.dll` 逐一核对。**
+- `XiBpBuilder.csproj` —— netstandard2.1 工程（7 个程序集引用，见该目录 README）
+- `README.md` —— 免责声明 + 构建指引 + 已知编译错误对照
 
-原版真身位置（交接文档 §2.1）：`E:\wkbdfile\2026-08-17-16-03-22\bpbuild\Plugin.cs`。
+原版真身（约 1500 行）未包含在本仓库；参考骨架已于 2026-09-21 实机编译验证通过
+（.NET SDK 9 + DS 1.0 + BepInEx 5，0 警告 0 错误，见 PR #1 实测报告 / issue #2）。
+编译通过只覆盖「直接调用的成员」；`AccessTools` 反射字符串编译期不检查，运行时行为仍须实测。

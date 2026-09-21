@@ -5,14 +5,14 @@
 串成可断点续跑的阶段机：阶段状态落 <work>/state.json，任何一段失败即停，重跑只补缺的段。
 
     python bp_pipeline.py preflight --bp usagi.blueprint --work runs/usagi1
-    python bp_pipeline.py autosite  --work runs/usagi1 --world "D:/.../worlds_local/WORLD"
-    python bp_pipeline.py backup    --work runs/usagi1 --world "D:/.../worlds_local/WORLD"
-    python bp_pipeline.py install   --work runs/usagi1 --server "D:/.../Valheim dedicated server" \
-                                     --bepinex-src "E:/.../BepInExPack_Valheim" --plugin-dll XiBpBuilder.dll \
+    python bp_pipeline.py autosite  --work runs/usagi1 --world "<存档根>/worlds_local/WORLD"
+    python bp_pipeline.py backup    --work runs/usagi1 --world "<存档根>/worlds_local/WORLD"
+    python bp_pipeline.py install   --work runs/usagi1 --server "<服务器安装目录>" \
+                                     --bepinex-src "<BepInExPack 解包目录>" --plugin-dll XiBpBuilder.dll \
                                      --site-x -262 --site-z 270 --platform-y 39.4
-    python bp_pipeline.py run       --work runs/usagi1 --server "..." [--bat start_headless_server.bat]
+    python bp_pipeline.py run       --work runs/usagi1 --server "<服务器安装目录>" [--bat start_headless_server.bat]
     python bp_pipeline.py verify    --work runs/usagi1
-    python bp_pipeline.py teardown  --work runs/usagi1 --server "..."
+    python bp_pipeline.py teardown  --work runs/usagi1 --server "<服务器安装目录>"
     python bp_pipeline.py report    --work runs/usagi1
     # 或一条龙（参数取并集，任何一段失败即停）：
     python bp_pipeline.py all --bp ... --work ... --world ... --server ... --bepinex-src ... --plugin-dll ...
@@ -132,9 +132,14 @@ def cmd_preflight(a, st):
         risks.append('含地下结构 %d 件 → 落地需地形开挖 = 崩塌+delta 丢失双高危（铁律 7：默认劝退）' % rep['underground'])
         level = 'high'
     if rep.get('hash_miss'):
-        risks.append('哈希未命中 %d 件 → 落地必失败，先补 prefab 名单：%s'
+        # issue #3：hashlib.json 是「名字表」不是「有效性表」——查不到 ≠ hash 无效。
+        # hash 由名字经 StableHash 直接算出，1.0 新构件/命名变体（如 wood_wall_log_4x0.5）
+        # 常未收录进表但 hash 有效可落地（实测该件落地时「哈希与游戏不一致 0 个」）。
+        # 有效性判据在运行时（ZNetScene.GetPrefab），离线不可判定 → 只作 warning，不阻断。
+        risks.append('名字未收录 %d 件（hash 由名字直接算出，通常仍有效，不影响其余件落地）：%s —— '
+                     '落地时若运行时日志报「哈希与游戏不一致 / prefab 未找到」再回补 prefab 名单'
                      % (rep['hash_miss'], rep.get('hash_missing_names')))
-        level = max(level, 'high') if level != 'high' else 'high'
+        level = 'medium' if level == 'ok' else level
     if rep.get('with_zdoData') or rep.get('with_info'):
         risks.append('info %d 件 / zdoData %d 件：件清单只存 name|hash|x|y|z|yaw，附加数据不随行'
                      % (rep.get('with_info', 0), rep.get('with_zdoData', 0)))
@@ -414,6 +419,14 @@ def cmd_verify(a, st):
     if not p:
         die('找不到 install 参数（先 install）')
     sink = a.sink if a.sink is not None else st['stages'].get('run', {}).get('sink', 0.0)
+    # 验收前置（issue #5）：索引恒等式 sum(chunk 头计数) == 索引 total，不成立即拒绝
+    ident = bp_reconcile.identity_check(world)
+    if ident['ok'] is False:
+        die('验收前置检查失败：索引 total=%s ≠ 各 chunk 头计数之和=%s —— 存档损坏或布局不匹配，'
+            '拒绝出存活率' % (ident['index'], ident['chunk_sum']))
+    if ident['ok'] is True:
+        print('✓ 索引恒等式：各 chunk 计数之和 == 索引 total == %d（%d 个 zone）'
+              % (ident['index'], ident['zones']))
     with open(man_path, encoding='utf-8') as f:
         manifest = json.load(f)
     exp = bp_reconcile.transform_pieces(manifest, p['site_x'], p['site_z'],
@@ -425,7 +438,7 @@ def cmd_verify(a, st):
     res['pass'] = bp_reconcile.verdict(res, a.min_rate)
     with open(os.path.join(a.work, 'reconcile.json'), 'w', encoding='utf-8') as f:
         json.dump(res, f, ensure_ascii=False, indent=1)
-    stage(st, 'verify', ok=res['pass'], **{k: res[k] for k in
+    stage(st, 'verify', ok=res['pass'], identity=ident, **{k: res[k] for k in
           ('expected', 'matched', 'missing', 'rate', 'extra_in_bbox_total')})
     print('离线对账：期望 %d | 匹配 %d | 缺失 %d | 盒内多出 %d → 存活率 %.2f%% %s'
           % (res['expected'], res['matched'], res['missing'], res['extra_in_bbox_total'],
@@ -487,7 +500,11 @@ def cmd_report(a, st):
         elif name == 'run':
             rows.append((name, '✅' if s['ok'] else '❌', 'owned=%s built=%s/%s sink=%s' % (s.get('owned'), s.get('built'), st['stages'].get('preflight', {}).get('pieces'), s.get('sink'))))
         elif name == 'verify':
-            rows.append((name, '✅' if s['ok'] else '❌', '匹配 %s/%s（%.2f%%）' % (s.get('matched'), s.get('expected'), (s.get('rate') or 0) * 100)))
+            ident = '，索引恒等式 ✓（total=%s）' % s['identity']['index'] \
+                if (s.get('identity') or {}).get('ok') else ''
+            rows.append((name, '✅' if s['ok'] else '❌',
+                         '匹配 %s/%s（%.2f%%）%s' % (s.get('matched'), s.get('expected'),
+                                                     (s.get('rate') or 0) * 100, ident)))
         elif name == 'teardown':
             rows.append((name, '✅' if s['ok'] else '❌', '隔离区 `%s`' % s.get('quarantine', '')))
         else:
@@ -531,12 +548,55 @@ def cmd_report(a, st):
     return True
 
 
+
+
+# ---------------------------------------------------------------- 自检（issue #3 回归）
+def selftest():
+    """两案回归：
+    A. 名字未收录（hash 合法、名字不在 hashlib.json）→ warning 级，不得出现「必失败」（issue #3）
+    B. 地下结构 → 仍须 high 级劝退（铁律 7 不放松）
+    """
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix='bppipe_selftest_')
+
+    def run_case(name, body):
+        bp = os.path.join(tmp, name + '.blueprint')
+        with open(bp, 'w', encoding='utf-8') as f:
+            f.write('#Name:%s\n#Creator:selftest\n#Description:""\n#Category:Building\n#Pieces\n' % name)
+            f.write(body)
+        work = os.path.join(tmp, name + '_work')
+        os.makedirs(work, exist_ok=True)
+        a = argparse.Namespace(bp=bp, work=work, structure_only=False)
+        st = state_load(work)
+        cmd_preflight(a, st)
+        return st['stages']['preflight']
+
+    # A：wood_wall_log_4x0.5 = 真实存在但名字表未收录（issue #3 实证样本）
+    sA = run_case('caseA', 'wood_floor;Building;0;0;0;0;0;0;1;"";1;1;1\n'
+                           'wood_wall_log_4x0.5;Building;2;0;0;0;0;0;1;"";1;1;1\n')
+    okA = (sA['risk_level'] != 'high' and sA['ok'] is True
+           and any('未收录' in r for r in sA['risks'])
+           and all('必失败' not in r for r in sA['risks']))
+    print('A 名字未收录→warning : level=%s ok=%s → %s'
+          % (sA['risk_level'], sA['ok'], 'PASS' if okA else 'FAIL'))
+
+    # B：py=-1.5 < DEEP_PY=-1.2 → 地下结构，必须 high + 劝退
+    sB = run_case('caseB', 'wood_floor;Building;0;-1.5;0;0;0;0;1;"";1;1;1\n')
+    okB = (sB['risk_level'] == 'high' and sB['ok'] is False
+           and any('地下结构' in r for r in sB['risks']))
+    print('B 地下结构→high 劝退 : level=%s ok=%s → %s'
+          % (sB['risk_level'], sB['ok'], 'PASS' if okB else 'FAIL'))
+
+    ok = okA and okB
+    print('selftest:', '两案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
+    return 0 if ok else 1
+
 # ---------------------------------------------------------------- CLI
 def main(argv=None):
     ap = argparse.ArgumentParser(description='蓝图落地七段流水线编排器（一条命令从解析到验收）')
-    ap.add_argument('cmd', choices=STAGES + ['all'])
+    ap.add_argument('cmd', nargs='?', choices=STAGES + ['all'])
     ap.add_argument('--bp', help='蓝图文件（preflight/all）')
-    ap.add_argument('--work', required=True, help='运行目录（state/manifest/备份/报告都放这）')
+    ap.add_argument('--work', help='运行目录（state/manifest/备份/报告都放这）')
     ap.add_argument('--world', help='世界存档目录（含 .chunk/.chunks）')
     ap.add_argument('--server', help='dedicated server 安装目录')
     ap.add_argument('--bepinex-src', help='BepInExPack_Valheim 解包目录（四件套来源）')
@@ -564,7 +624,15 @@ def main(argv=None):
     ap.add_argument('--allow-high-risk', action='store_true', help='地下结构也硬闯（默认劝退）')
     ap.add_argument('--force', action='store_true', help='teardown 不看 verify 结果')
     ap.add_argument('--dry-run', action='store_true', help='只打印将执行的动作')
+    ap.add_argument('--selftest', action='store_true', help='跑内置回归自检（issue #3）')
     a = ap.parse_args(argv)
+
+    if a.selftest:
+        return selftest()
+    if not a.cmd:
+        ap.error('cmd 必填（%s 或 --selftest）' % '/'.join(STAGES))
+    if not a.work:
+        ap.error('--work 必填（或 --selftest）')
 
     if a.cmd in ('install', 'all') and a.protect_x is None and a.site_x is not None:
         a.protect_x, a.protect_z = a.site_x - 43.0, a.site_z    # ◐DOC: 保护圈=落点外约 43m（usagi 案例）

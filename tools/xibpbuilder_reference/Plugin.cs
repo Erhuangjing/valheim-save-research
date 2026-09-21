@@ -4,12 +4,12 @@
 //  ⚠️ 免责声明（务必先读）：
 //   本文件是从本仓库 4 份实验文档（交接文档 / 服务端激活报告 / 锚点收官报告 /
 //   地形重塑说明）里散落的真实 patch 代码 **重建** 出来的机制骨架，
-//   **不是** 原版 XiBpBuilder v0.31.1（约 1500 行，在用户机器
-//   E:\wkbdfile\2026-08-17-16-03-22\bpbuild\Plugin.cs）。
+//   **不是** 原版 XiBpBuilder v0.31.1（约 1500 行，未包含在本仓库）。
 //
-//   本沙箱没有 Valheim 程序集 / BepInEx / dotnet，**无法编译验证**。
-//   所有反射签名（私有字段名、方法名、layer mask、协程时序常量）在部署前
-//   **必须** 对 assembly_valheim.dll 逐一核对。
+//   编译状态：2026-09-21 实机验证通过（.NET SDK 9 + Valheim dedicated server 1.0
+//   + BepInEx 5，0 警告 0 错误，产物 28,672 字节 —— 见 PR #1 实测报告 / issue #2）。
+//   注意：编译通过只证明「直接调用的成员」存在；**反射字符串**（AccessTools 里的
+//   私有字段名/方法名）编译期不检查，仍须运行时验证。
 //
 //   代码来源标注：
 //     ✓DOC  = 文档里有逐字代码，此处忠实誊录
@@ -28,6 +28,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using BepInEx;
+using BepInEx.Configuration;   // issue #2：ConfigEntry<> 在此命名空间，缺了 28×CS0246
 using BepInEx.Logging;
 using HarmonyLib;
 using UnityEngine;

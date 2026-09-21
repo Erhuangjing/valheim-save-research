@@ -106,7 +106,7 @@ prefab   (int32, StableHash)
 
 **唯一实测走通的路线 = 启动 dedicated server 时进程内实时构建**（处理地形 + 清障 + 建房，客户端零 mod、
 落地后删净 BepInEx）。完整启动时序与全部 Harmony patch 见 `docs/Valheim_服务端实时构建机制_详解.md`，
-配套参考代码骨架见 `tools/xibpbuilder_reference/`（**从实验日志重建、未编译验证**，见其 README 免责）。
+配套参考代码骨架见 `tools/xibpbuilder_reference/`（从实验日志重建；2026-09-21 实机编译通过，反射签名仍须运行时验证，见其 README）。
 
 ---
 
@@ -139,7 +139,7 @@ Valheim 1.0 起，控制台命令（`devcommands` / `spawn` 等）会在**角色
 docs/      研究文档（技术报告、实验记录、社区参考结论、复盘）
 format/    prefab 名 ↔ 哈希对照表（57,706 条）
 tools/     解析与改写脚本
-tools/xibpbuilder_reference/   服务端实时构建插件的参考代码骨架（重建、未编译验证）
+tools/xibpbuilder_reference/   服务端实时构建插件的参考代码骨架（重建；实机编译已通过）
 ```
 
 ### tools 说明
@@ -154,8 +154,8 @@ tools/xibpbuilder_reference/   服务端实时构建插件的参考代码骨架�
 | `land_official.py` | 蓝图落地（密度法定 chunk + 自动锚点） |
 | `anchor_diff.py` | 锚点差分定位 |
 | `bp_parse.py` | **通用蓝图解析器**（`.blueprint` / `.vbuild` / zip / 市场 blob → 件清单 + 落地预检报告，含 GroundLayerPy 自动推导） |
-| `bp_reconcile.py` | **落地离线对账**（期望件 vs 存档实况，hash+位置双匹配 y 量化；坑 C.2 的入库版，含 selftest） |
-| `bp_pipeline.py` | **七段流水线编排器**（解析预检→自动选点→备份→部署执行器→headless 盯日志→离线对账→删净 BepInEx→报告，一条命令；铁律内建，支持断点续跑与 dry-run） |
+| `bp_reconcile.py` | **落地离线对账**（期望件 vs 存档实况，hash+位置双匹配 y 量化；坑 C.2 入库版；验收前置「索引恒等式」检查 + `precise_scan` 精确扫描；selftest 四案全过） |
+| `bp_pipeline.py` | **七段流水线编排器**（解析预检→自动选点→备份→部署执行器→headless 盯日志→离线对账→删净 BepInEx→报告，一条命令；铁律内建，断点续跑与 dry-run；含 selftest 回归（issue #3 名字未收录不误报）） |
 | `bp_autosite.py` | **AutoFindFlat 离线选落点**（持久自然物 ZDO 的 y 做地表代理测高：平坦/陆地/无人区/样本足四判据，产出候选落点+PlatformY；selftest 三案全过） |
 | `clear_devcommands.py` | **清除角色档的作弊标记**（含进程检查 + 备份 + dry-run） |
 | `check_cheat.py` | 检查角色/世界存档里的作弊标记 |

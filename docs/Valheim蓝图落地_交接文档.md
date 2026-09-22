@@ -169,7 +169,7 @@ levelDelta[index] = Mathf.Clamp(req, -8f, 8f);  // 游戏内部限制 c_LevelMax
 smoothDelta[index] = 0f;
 modifiedHeight[index] = true;
 ```
-写完后按顺序:取 `ZNetView` 所有权 → `TerrainComp.Save(false)` → `ApplyModifiers()` → `Poke()` →
+写完后按顺序:取 `ZNetView` 所有权 → `TerrainComp.Save(false)` → `ApplyModifiers()` → `Poke(0, false)` →
 `UpdateCornerDepths()` → `RebuildCollisionMesh()` → `RebuildRenderMesh()`。
 
 **硬限制**:地形 delta 是**相对原始地形**的,游戏内部 clamp 在 **±8 米**。地窖往往要挖 5~8 米,

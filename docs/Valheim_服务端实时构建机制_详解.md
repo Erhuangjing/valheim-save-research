@@ -183,6 +183,7 @@ modifiedHeight[index] = true;
 
 ```
 Heightmap.m_heights      ← 游戏实际使用的高度（只写 delta 的话，地面纹丝不动 = "没生效"）
+                           ⚠ 类型是 List<float>（不是 float[]，issue #19③：显式转 float[] 编译能过、运行抛 InvalidCastException）
 TerrainComp.m_levelDelta ← 相对原始高度的偏移，供存档序列化持久化
 ```
 
@@ -191,9 +192,20 @@ TerrainComp.m_levelDelta ← 相对原始高度的偏移，供存档序列化持
 ### 5.4 写完的重建调用链（顺序不能乱）
 
 ```
-取 ZNetView 所有权 → TerrainComp.Save(false) → ApplyModifiers() → Poke()
+取 ZNetView 所有权 → TerrainComp.Save(false) → ApplyModifiers() → Poke(0, false)
 → UpdateCornerDepths() → RebuildCollisionMesh() → RebuildRenderMesh()
 ```
+
+⚠ **调用对象别搞错（issue #19，反射实测）**：这条链上只有 `Save(bool)` 在 **TerrainComp** 侧，
+`ApplyModifiers` / `Poke` / `UpdateCornerDepths` / `RebuildCollisionMesh` / `RebuildRenderMesh`
+**全在 Heightmap 侧**。参考骨架原来把 `ApplyModifiers` 调在 TerrainComp 上，而
+`AccessTools.Method` 找不到方法时 `m?.Invoke` 会**静默跳过** → 链断一环却不报错。
+写反射调用时务必让「方法不存在」变成一条显式日志。
+
+同理，取 heightmap / TerrainComp 的正确入口是（同为反射实测）：
+`Heightmap.FindHeightmap(Vector3, float, List<Heightmap>)` 或 `Heightmap.GetAllHeightmaps()`（**没有** `GetAllInstances()`）、
+`Heightmap.GetAndCreateTerrainCompiler()`（会创建缺失的 TerrainComp）——
+`ZoneSystem.GetZone` 是静态且返回 zone id，不能喂给 `FindTerrainCompiler`（它要世界坐标）。
 
 ### 5.5 ±8m 硬限 + delta 丢失事故（必须知道的风险）
 
@@ -308,7 +320,12 @@ static bool Prefix(WearNTear __instance) {
 }
 ```
 
-收官结论：**锚点求解成功后 `Support.Enabled` 可保持 `false`**——靠锁定是"发免塌证"，靠锚点是真稳。
+> ⚠️ **2026-09-22 实测更正（issue #13）**：上面的收官结论**错了**。锚点求解成功（必死=0）
+> 只保证「支撑几何」成立，阻止不了解冻后**原生磨损系统**的销毁（调用栈：
+> `WearNTearUpdater.UpdateWearNTear → UpdateWear → ApplyDamage → Destroy → ZNetScene.Destroy`）。
+> 5 蓝图 8 轮 A/B 实测：`Support.Enabled=false` 掉件 **3.7%~15.9%**（锚点成功的几轮照样掉），
+> `=true` **±0**、磨损销毁事件 0 条。**默认必须开**；锁仍只作用于 mark==1 的本工具件。
+> 「靠锚点是真稳」对**支撑**成立，对**磨损**不成立——两者是不同的销毁路径。
 
 ### 8.2 对账补齐（把塌掉/漏掉的件补回来，交接文档 §9.4）
 

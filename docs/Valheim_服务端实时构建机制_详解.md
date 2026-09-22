@@ -192,7 +192,7 @@ TerrainComp.m_levelDelta ← 相对原始高度的偏移，供存档序列化持
 ### 5.4 写完的重建调用链（顺序不能乱）
 
 ```
-取 ZNetView 所有权 → TerrainComp.Save(false) → ApplyModifiers() → Poke()
+取 ZNetView 所有权 → TerrainComp.Save(false) → ApplyModifiers() → Poke(0, false)
 → UpdateCornerDepths() → RebuildCollisionMesh() → RebuildRenderMesh()
 ```
 

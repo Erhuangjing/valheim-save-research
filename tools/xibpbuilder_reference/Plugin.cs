@@ -892,7 +892,7 @@ namespace XiBpBuilder
             if (!TryInvoke(tcomp, "Save", false))       Miss(tcomp, "Save");
             if (!TryInvoke(hmap, "ApplyModifiers")
                 && !TryInvoke(tcomp, "ApplyModifiers")) Miss(hmap, "ApplyModifiers");   // 兜底：万一在 TerrainComp
-            if (!TryInvoke(hmap, "Poke"))               Miss(hmap, "Poke");
+            if (!TryInvoke(hmap, "Poke", 0, false))     Miss(hmap, "Poke");   // issue #22：实测签名 Poke(int delayed, bool paintOnly)
             if (!TryInvoke(hmap, "UpdateCornerDepths")) Miss(hmap, "UpdateCornerDepths");
             if (!TryInvoke(hmap, "RebuildCollisionMesh")) Miss(hmap, "RebuildCollisionMesh");
             if (!TryInvoke(hmap, "RebuildRenderMesh"))  Miss(hmap, "RebuildRenderMesh");
@@ -903,7 +903,9 @@ namespace XiBpBuilder
         }
         private static bool TryInvoke(object o, string method, params object[] args)
         {
-            var m = AccessTools.Method(o.GetType(), method, args.Length > 0 ? new[]{ args[0].GetType() } : null);
+            // issue #22：参数类型必须按完整列表匹配。原来只取 args[0] → 多参方法永远配不上；无参时传 null
+            // 又等于「任取一个同名重载」→ 拿到带参的 Poke 再按 0 个参数 Invoke，直接抛 TargetParameterCountException。
+            var m = AccessTools.Method(o.GetType(), method, Type.GetTypeArray(args));
             if (m == null) return false;              // issue #19：不再 `m?.Invoke` 静默吞掉「方法不存在」
             m.Invoke(o, args);
             return true;

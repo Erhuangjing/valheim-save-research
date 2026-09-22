@@ -12,9 +12,9 @@
 
 **编译状态**：2026-09-21 实机验证通过（.NET SDK 9.0.313 + Valheim dedicated server 1.0 + BepInEx 5，
 0 警告 0 错误，产物 `bin/Release/XiBpBuilder.dll` 28,672 字节；8 个协程状态机完整——见 PR #1 实测报告）。
-⚠️ **该结论对应的是 #19 之前的修订**。第三轮（#19）改了 Terrain 段的 3 处 API 签名 + 重建链调用对象，
-**尚未在带 Valheim 程序集的环境里重新编译**（本轮改动方无游戏二进制）——部署前请先 `dotnet build`
-确认，签名依据见下「Terrain 段：反射实测 API」。
+第三轮（#19 Terrain 段 3 处 API 签名 + 重建链调用对象）与 #22（`Poke` 参数 + `TryInvoke` 类型匹配）之后，
+2026-09-22 按同一口径（只替换 `REPLACE_ME`）重新编译：0 警告 0 错误。签名依据见下「Terrain 段：反射实测 API」；
+`Terrain.Enabled=true + Carve=true` 的实机结果见 issue #22。
 **运行状态**：隔离环境端到端实测通过（清障→落地→保存，1805/1805 零丢失、prefab 校验失败 0、
 坐标公式反推精确吻合）。已修的运行期问题分三轮：
 第一轮（#7 uint32 hash 溢出 / #8 锚点 NRE 静默 / #9 GUID 致 cfg 不通用）；
@@ -44,7 +44,7 @@ false 掉件 3.7%~15.9%、true ±0）、**#12 锚点位移重构**（全集统�
 | 取附近 heightmap | `static void Heightmap.FindHeightmap(Vector3 point, float radius, List<Heightmap> out)`；全量：`static List<Heightmap> Heightmap.GetAllHeightmaps()` | ❌ `Heightmap.GetAllInstances()` **不存在**——那是 `get_Instances()`（`List<IMonoUpdater>`）。本次两条都用：半径筛 + 筛不到时全量兜底 |
 | 取 TerrainComp | `TerrainComp Heightmap.GetAndCreateTerrainCompiler()`（实例方法，缺失时创建）；`static TerrainComp TerrainComp.FindTerrainCompiler(Vector3 worldPos)`（只返回已存在的） | ❌ `ZoneSystem.GetZone` 是**静态**且返回 `Vector2s`（zone id），`FindTerrainCompiler` 要的是**世界坐标**——原写法既有 CS0176 又有 CS1503 |
 | 高度数组 | `List<float> Heightmap.m_heights`（`(width+1)²` 行主序，`index = z*(width+1)+x`） | ❌ 原写法 `(float[])…` 编译能过、运行必抛 `InvalidCastException` |
-| 重建链 | `TerrainComp.Save(bool)` + **Heightmap** 侧 `ApplyModifiers / Poke / UpdateCornerDepths / RebuildCollisionMesh / RebuildRenderMesh` | ❌ 原写法把 `ApplyModifiers` 调在 TerrainComp 上，而 `m?.Invoke` 会**静默吞掉**「方法不存在」→ 链断一环不报错。现在缺方法记名 + 拒绝写 `terrain_done` |
+| 重建链 | `TerrainComp.Save(bool)` + **Heightmap** 侧 `ApplyModifiers() / Poke(int delayed, bool paintOnly) / UpdateCornerDepths() / RebuildCollisionMesh() / RebuildRenderMesh()` | ❌ 原写法把 `ApplyModifiers` 调在 TerrainComp 上，而 `m?.Invoke` 会**静默吞掉**「方法不存在」→ 链断一环不报错。现在缺方法记名 + 拒绝写 `terrain_done`。❌ issue #22：`Poke` **带 2 参**；反射取方法必须传**完整**参数类型数组（无参传空数组，不是 `null`——`null` = 任取同名重载，Invoke 时抛 `TargetParameterCountException`） |
 | 同一个高度 | `float Heightmap.GetHeight(int x, int z)`（**参数序 (x,z)**；文档实证：`hmap.GetHeight(j, i)`） | 同名重载可能不止一个 → 反射取方法时显式指定 `(int,int)` |
 
 **`m_heights` 布局的运行时自检**：`(width+1)² 行主序` 与 `index 算法` 一直是文档推断、从未实证，

@@ -128,6 +128,9 @@ def cmd_preflight(a, st):
 
     # 风险门（铁律 5/7）
     risks, level = [], 'ok'
+    if not pieces:
+        risks.append('解析出 0 件（格式未识别或空文件）—— 拒绝通过，不许 0/0 报 ok（issue #17）')
+        level = 'high'
     if rep.get('underground'):
         risks.append('含地下结构 %d 件 → 落地需地形开挖 = 崩塌+delta 丢失双高危（铁律 7：默认劝退）' % rep['underground'])
         level = 'high'
@@ -202,17 +205,19 @@ def cmd_autosite(a, st):
     sites, rej = bp_autosite.find_sites(records, tile_w=tile_w, tile_d=tile_d,
                                         water_level=a.water_level,
                                         min_samples=a.min_samples,
-                                        max_spread=a.max_spread, top=a.top)
+                                        max_spread=a.max_spread, top=a.top,
+                                        max_burial=a.max_burial)
     print('扫描 %d 条记录 | 格子 %.0f×%.0f m | 拒绝统计: %s' % (len(records), tile_w, tile_d, rej))
     if not sites:
         print('✗ 无合格落点：放宽 --max-spread / --min-samples，或换区域'
               '（样本稀疏 = 少人踩点，可能空旷但无法验平，需进游戏目视确认）')
         stage(st, 'autosite', ok=False, rejects=rej)
         return False
-    print('%-12s %-12s %-10s %-6s %-5s %s' % ('site_x', 'site_z', 'PlatformY', '起伏', '样本', '自然物(树/岩/采集)'))
+    print('%-12s %-12s %-10s %-6s %-8s %-8s %-5s %s' % ('site_x', 'site_z', 'PlatformY', '起伏', '埋深p95', '埋深max', '样本', '自然物(树/岩/采集)'))
     for q in sites:
-        print('%-12.1f %-12.1f %-10.2f %-6.2f %-5d %d/%d/%d'
-              % (q['site_x'], q['site_z'], q['platform_y'], q['spread'], q['samples'],
+        print('%-12.1f %-12.1f %-10.2f %-6.2f %-8.2f %-8.2f %-5d %d/%d/%d'
+              % (q['site_x'], q['site_z'], q['platform_y'], q['spread'],
+                 q['burial_p95'], q['burial_max'], q['samples'],
                  q['trees'], q['rocks'], q['pickables']))
     b = sites[0]
     stage(st, 'autosite', ok=True, site_x=b['site_x'], site_z=b['site_z'],
@@ -249,7 +254,9 @@ def gen_cfg(p):
                     ('Embed', '0.3'), ('MaxDelta', '8'), ('Margin', '8'), ('PlatformY', p['platform_y'])])
     sec('Activate', [('Enabled', 'true'), ('X', p['site_x']), ('Y', '0'), ('Z', p['site_z'])])
     sec('Anchor', [('AutoSolve', 'true'), ('Target', '200'), ('MaxShift', '2'), ('SinkStep', '0.05')])
-    sec('Support', [('Enabled', 'false')])
+    sec('Support', [('Enabled', 'true', 'issue #13：默认开。锚点求解成功（必死=0）≠ 件不会被磨损打坏——'
+                                   '原生磨损在解冻后照样销毁（A/B 实测 false 掉件 3.7~15.9%，true ±0）；锁只作用于本工具件'),
+                    ('Diagnose', 'true')])
     return '\n'.join(L)
 
 
@@ -593,8 +600,15 @@ def selftest():
     print('B 地下结构→high 劝退 : level=%s ok=%s → %s'
           % (sB['risk_level'], sB['ok'], 'PASS' if okB else 'FAIL'))
 
-    ok = okA and okB
-    print('selftest:', '两案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
+    # C：解析出 0 件 → 必须 high + 拒绝，绝不 0/0 报 ok（issue #17）
+    sC = run_case('caseC', 'this is not a valid piece line\n')
+    okC = (sC['risk_level'] == 'high' and sC['ok'] is False
+           and any('0 件' in r for r in sC['risks']))
+    print('C 0件→high 拒绝     : level=%s ok=%s → %s'
+          % (sC['risk_level'], sC['ok'], 'PASS' if okC else 'FAIL'))
+
+    ok = okA and okB and okC
+    print('selftest:', '三案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
     return 0 if ok else 1
 
 # ---------------------------------------------------------------- CLI
@@ -620,6 +634,7 @@ def main(argv=None):
     ap.add_argument('--site-margin', type=float, default=16.0, help='autosite 格子外扩（米，默认 16）')
     ap.add_argument('--min-samples', type=int, default=8, help='autosite 每格最少样本数')
     ap.add_argument('--max-spread', type=float, default=2.0, help='autosite 格内起伏上限（米）')
+    ap.add_argument('--max-burial', type=float, default=1.0, help='autosite 埋深阈值（米，默认 1.0；实测 >1m 掉件率开始上行）')
     ap.add_argument('--water-level', type=float, default=30.0, help='海平面（默认 30）')
     ap.add_argument('--top', type=int, default=10, help='autosite 输出前 N 个候选')
     ap.add_argument('--sink', type=float, help='对账用整体位移（默认取 run 段日志解析值）')

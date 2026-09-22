@@ -308,7 +308,12 @@ static bool Prefix(WearNTear __instance) {
 }
 ```
 
-收官结论：**锚点求解成功后 `Support.Enabled` 可保持 `false`**——靠锁定是"发免塌证"，靠锚点是真稳。
+> ⚠️ **2026-09-22 实测更正（issue #13）**：上面的收官结论**错了**。锚点求解成功（必死=0）
+> 只保证「支撑几何」成立，阻止不了解冻后**原生磨损系统**的销毁（调用栈：
+> `WearNTearUpdater.UpdateWearNTear → UpdateWear → ApplyDamage → Destroy → ZNetScene.Destroy`）。
+> 5 蓝图 8 轮 A/B 实测：`Support.Enabled=false` 掉件 **3.7%~15.9%**（锚点成功的几轮照样掉），
+> `=true` **±0**、磨损销毁事件 0 条。**默认必须开**；锁仍只作用于 mark==1 的本工具件。
+> 「靠锚点是真稳」对**支撑**成立，对**磨损**不成立——两者是不同的销毁路径。
 
 ### 8.2 对账补齐（把塌掉/漏掉的件补回来，交接文档 §9.4）
 

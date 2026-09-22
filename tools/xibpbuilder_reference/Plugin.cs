@@ -50,7 +50,9 @@ namespace XiBpBuilder
         internal static bool s_freezeWear  = true;       // ◐DOC: 手术窗口，默认冻磨损
         internal static bool s_buildDone   = false;      // ✓DOC: 收官报告用它修诊断时序
         internal static bool s_cleanupDone = false;
-        internal static readonly HashSet<long> s_ourZdoIds = new HashSet<long>();  // 我们创建的件
+        internal static readonly HashSet<ZDOID> s_ourZdoIds = new HashSet<ZDOID>();  // 本 run 创建的件（issue #12：位移的唯一权威集合）
+        internal static readonly Dictionary<ZDOID, float> s_initialY = new Dictionary<ZDOID, float>();  // 首次位移前 y（Δy 单值校验）
+        internal static bool s_instancesReady;   // WaitInstancesReady 结果载体（迭代器带不出返回值）
 
         // ====================================================================
         //  配置（REF: 按交接文档 §5.3 的 cfg 全清单声明，类型/默认值可能有出入）
@@ -125,7 +127,9 @@ namespace XiBpBuilder
             CfgMaxShift = Config.Bind("Anchor", "MaxShift", 2f);        // ✓DOC: 双向 ±2m
             CfgSinkStep = Config.Bind("Anchor", "SinkStep", 0.05f);
 
-            CfgSupportOn   = Config.Bind("Support", "Enabled", false);  // ✓DOC: 锚点成功则不需锁
+            // issue #13：默认必须开。锚点求解成功（必死=0）阻止不了解冻后的原生磨损销毁
+            //（A/B 实测：false 掉件 3.7%~15.9%，true = ±0）；锁只作用于 mark==1 的本工具件
+            CfgSupportOn   = Config.Bind("Support", "Enabled", true);
             CfgSupportDiag = Config.Bind("Support", "Diagnose", true);
             CfgMarkKey     = Config.Bind("Support", "MarkKey", "xiabp");
 
@@ -135,7 +139,13 @@ namespace XiBpBuilder
             harmony.PatchAll(typeof(PatchActivate));
             harmony.PatchAll(typeof(PatchFreezeWear));
             harmony.PatchAll(typeof(PatchSupportLock));
-            Log.LogInfo("XiBpBuilder(ref) 已加载，patch 注册 4 个");
+            // issue #13 附：补丁自检。⚠ PatchAll(Type) 只补那一个类、不是整个程序集——
+            // 新增补丁类忘注册会静默失效（实测两轮探测全假阴性的教训）。
+            // 启动时打印实际挂载数与方法名，与预期不符立刻能看出来。
+            var patched = Harmony.GetAllPatchedMethods().ToList();
+            Log.LogInfo($"XiBpBuilder(ref) 已加载，patch 注册 4 个，实际挂载方法数 = {patched.Count}");
+            foreach (var m in patched)
+                Log.LogInfo($"[patch]    {m.DeclaringType?.Name}.{m.Name}");
         }
 
         // ====================================================================
@@ -233,21 +243,37 @@ namespace XiBpBuilder
             // 段2 Cleanup（清障）
             if (CfgCleanOn.Value && (!HasFlag("cleanup_done") || CfgForce.Value))
                 yield return StartCoroutine(CleanupTask());
+            else if (HasFlag("cleanup_done"))
+                Log.LogInfo("[清理] 跳过：cleanup_done 标志存在（重跑 = 删 BepInEx/config/cleanup_done.flag）");  // issue #16③
 
             // 段3 Terrain（处理地形，默认关；首选天然平地避 delta 丢失）
             if (CfgTerrainOn.Value && (!HasFlag("terrain_done") || CfgForce.Value))
                 yield return StartCoroutine(TerrainTask(pieces));
+            else if (HasFlag("terrain_done"))
+                Log.LogInfo("[地形] 跳过：terrain_done 标志存在（重跑 = 删该 flag）");  // issue #16③
 
-            // 段4 Build（建房）
-            if (!HasFlag("bp_done") || CfgForce.Value)
+            // 段4 Build（建房）。issue #12：只有「全新建」才允许锚点整体位移——
+            // 对账补建路径只重建缺失件，位移会把新件从旧建筑上撕下来
+            bool freshBuild = !HasFlag("bp_done") || CfgForce.Value;
+            if (freshBuild)
                 yield return StartCoroutine(BuildTask(pieces));
             else if (CfgReconcile.Value)
+            {
+                Log.LogInfo("[落地] 跳过（bp_done 存在）→ 对账补建缺失件；完整重建 = 删 bp_done.flag");  // issue #16③
                 yield return StartCoroutine(ReconcileTask(pieces));   // 段6 对账补齐
+            }
+            else Log.LogWarning("[落地] 跳过（bp_done 存在且 Reconcile=false），本轮不动件");  // issue #16③
             s_buildDone = true;
 
             // 段5 Anchor（手术窗口内求解 + 整体位移）
             if (CfgAnchorAuto.Value)
-                yield return StartCoroutine(AnchorSolveTask());
+            {
+                if (freshBuild)
+                    yield return StartCoroutine(AnchorSolveTask());
+                else
+                    Log.LogWarning("[锚点] 跳过：对账补建路径只重建了缺失件，整体位移会撕裂建筑"
+                        + "（完整求解 = 删 bp_done.flag 重跑；本次落点高度以 cfg YOffset 为准）");
+            }
 
             // 解冻 → 真实 UpdateSupport 跑起来
             s_freezeWear = false;
@@ -281,7 +307,7 @@ namespace XiBpBuilder
                 int hitThisRound = 0;
                 foreach (var zdo in EnumAllZDO())
                 {
-                    if (s_ourZdoIds.Contains(zdo.m_uid.GetHashCode())) continue;   // REF: 保护我们的件
+                    if (s_ourZdoIds.Contains(zdo.m_uid)) continue;   // REF: 保护我们的件（issue #12：直接存 ZDOID）
                     Vector3 p = zdo.GetPosition();
                     if (InProtectCircle(p)) continue;                              // ✓DOC: 保护圈
                     bool inClean = Dist2D(p, CfgC1X.Value, CfgC1Z.Value) < CfgR1.Value;
@@ -308,6 +334,11 @@ namespace XiBpBuilder
             // 目标：把落点整平到 PlatformY（+ 可选按地下结构开挖）
             var hmaps = FindNearbyHeightmaps(CfgOriginX.Value, CfgOriginZ.Value, 93f);
             Log.LogInfo($"[地形] 落点 93m 内取用 {hmaps.Count} 个 Heightmap");
+            if (hmaps.Count == 0)
+            {
+                Log.LogError("[地形] 取到 0 个 Heightmap（落点太远/实现受限）——不写 terrain_done（issue #14）");
+                yield break;
+            }
             int changed = 0;
             foreach (var hc in hmaps)
             {
@@ -347,6 +378,11 @@ namespace XiBpBuilder
                 yield return null;
             }
             Log.LogInfo($"[地形] 改动 {changed} 个顶点（DryRun={CfgTerrainDryRun.Value}）");
+            if (changed == 0)
+            {
+                Log.LogWarning("[地形] 0 个顶点改动——不写 terrain_done（issue #14：空跑不留标志）");
+                yield break;
+            }
             if (!CfgTerrainDryRun.Value) WriteFlag("terrain_done");
         }
 
@@ -378,6 +414,12 @@ namespace XiBpBuilder
                     for (int f = 0; f < (int)CfgFrameDelay.Value; f++) yield return null;  // ✓DOC: FrameDelay
                 }
             }
+            if (created == 0)
+            {
+                Log.LogError($"★ 落地完成：0 件（失败 {fail} 次）——件清单空或哈希全无效，"
+                    + "不写 bp_done 标志（issue #17：避免后续运行静默跳过整个 Build 段）");
+                yield break;
+            }
             Log.LogInfo($"★ 落地完成：{created} 件，prefab 校验失败 {fail} 次");
             WriteFlag("bp_done");
         }
@@ -399,7 +441,7 @@ namespace XiBpBuilder
             zdo.Set(CfgMarkKey.Value, 1);        // ◐DOC: 打标，供 Support Lock / 保护圈识别
 
             if (zdo.GetPrefab() != hash) { Log.LogError($"[落地] 校验失败 {pc.name}"); return false; }  // ✓DOC 当场校验
-            s_ourZdoIds.Add(zdo.m_uid.GetHashCode());   // REF
+            s_ourZdoIds.Add(zdo.m_uid);   // issue #12：存 ZDOID 本体（GetHashCode 不保唯一）
             return true;
         }
 
@@ -409,22 +451,35 @@ namespace XiBpBuilder
         private IEnumerator AnchorSolveTask()
         {
             Log.LogInfo("[锚点] 求解开始（手术窗口内，磨损已冻）");
-            // issue #8：失败必须可见。原版实现异常被吞、流程照走，表面「很成功」实则自动求解
-            // 没生效（实测靠 cfg 手填 YOffset 兜底）。现改为：异常显式报错 + 结尾明确
-            // 「自动求解未生效，已回退 cfg 手填 YOffset」，不让使用者误删手填参数。
+            // issue #8：失败必须可见（异常显式报错 + 回退声明）。
+            // issue #12：位移对象 = 本 run 创建的全集（s_ourZdoIds），绝不用 mark key 反查
+            // m_objectsByID——mark 持久化在世界里，混入历史遗留会把他人的建筑整体下沉。
+            if (s_ourZdoIds.Count == 0)
+            {
+                Log.LogWarning("[锚点] 跳过：本 run 未创建件（s_ourZdoIds 为空）");
+                yield break;
+            }
+            // issue #12：等实例化齐再统一位移——对未实例化 ZDO 调 SetPosition 可能不持久，
+            // 且每轮按「已实例化子集」位移会让累计量因件而异（Δy 非单值的根因）。
+            yield return StartCoroutine(WaitInstancesReady(30f));
+            if (!s_instancesReady)
+            {
+                Log.LogWarning($"[锚点] ★ 实例化等待超时，自动求解未生效 —— YOffset 沿用 cfg 手填值 {CfgYOffset.Value}（issue #8/#12）");
+                yield break;
+            }
+
             float totalShift = 0f;
             bool failed = false;
             for (int round = 0; round < 3; round++)     // ✓DOC: 最多 3 轮闭环
             {
-                List<WearNTear> our = null;
-                var ds = new List<float>();
                 int mustDie = 0, anchor0 = 0, noCol = 0;
                 float bestShift = 0f;
+                List<WearNTear> our = null;
                 try
                 {
-                    our = CollectOurPieces();           // 每轮重收：位移/重实例化后旧实例会失效
+                    our = CollectOurPieces();           // 测量用实例（要 Collider 几何）；位移不走它
                     if (our.Count == 0) { Log.LogWarning("[锚点] 拿不到实例（mark 丢失或未实例化）"); failed = true; break; }
-                    ds = MeasureRound(our, out mustDie, out anchor0, out noCol);   // 逐件求 d_i
+                    MeasureRound(our, out mustDie, out anchor0, out noCol);   // 逐件求 d_i
                     // ✓DOC §8.3/§9.3 判据：选必死件最少的档，并列取更深
                     bestShift = PickShiftByMustDie(our);    // ◐DOC: 扫 [-MaxShift,+MaxShift]，step SinkStep
                 }
@@ -434,23 +489,91 @@ namespace XiBpBuilder
                     failed = true;
                     break;
                 }
-                ds.Sort();
                 Log.LogInfo($"[锚点] 第{round+1}轮 必死={mustDie} 锚点={anchor0} 无碰撞体跳过={noCol}");
                 if (Mathf.Approximately(bestShift, 0f) && mustDie == 0 && anchor0 >= CfgAnchorTarget.Value)
                 {
                     Log.LogInfo("[锚点] 已达标，停止");
                     break;
                 }
-                try { ApplyShift(our, bestShift); }    // ◐DOC: 整体位移（改 ZDO 位置）
+                try { ApplyShiftOurZdos(bestShift); }  // issue #12：全集统一位移（不再按每轮实例化子集）
                 catch (Exception e) { Log.LogError($"[锚点] 位移异常：{e}"); failed = true; break; }
                 totalShift += bestShift;
                 yield return new WaitForSeconds(0.5f); // REF: 等物理/几何更新（yield 必须在 try 外：迭代器语法限制）
             }
+
             if (failed)
+            {
                 Log.LogWarning($"[锚点] ★ 自动求解未生效 —— YOffset 沿用 cfg 手填值 {CfgYOffset.Value}；"
                     + "若为 0 则整栋按贴地硬边界落地，请按实测手调（issue #8）");
-            else
-                Log.LogInfo($"★ [锚点] 求解结束：累计位移 {totalShift:F2}m");
+                yield break;
+            }
+
+            // issue #12：Δy 单值校验（全量只读，比抽样便宜）——期望每件 Δy == totalShift
+            int checkedN = 0, mismatch = 0;
+            foreach (var kv in s_initialY)
+            {
+                var z = ZDOMan.instance.GetZDO(kv.Key);
+                if (z == null) continue;
+                checkedN++;
+                if (Mathf.Abs((z.GetPosition().y - kv.Value) - totalShift) > 0.05f) mismatch++;
+            }
+            Log.LogInfo($"[锚点] 位置校验：{checkedN} 件中 Δy≠累计位移 {mismatch} 件（容差 0.05m）");
+            if (mismatch > 0)
+                Log.LogWarning("[锚点] ⚠ Δy 非单值——未实例化件的位置可能未持久，复查位移时机（issue #12）");
+            Log.LogInfo($"★ [锚点] 求解结束：累计位移 {totalShift:F2}m");
+        }
+
+        // issue #12：等「本 run 创建的件」实例化齐（数量稳定）再位移；结果经 s_instancesReady 带出
+        private IEnumerator WaitInstancesReady(float timeout)
+        {
+            float t0 = Time.time;
+            int stable = 0, last = -1;
+            while (Time.time - t0 < timeout)
+            {
+                int live = 0;
+                foreach (var id in s_ourZdoIds)
+                {
+                    var z = ZDOMan.instance.GetZDO(id);              // REF: 签名待核
+                    if (z != null && ZNetScene.instance.FindInstance(z) != null) live++;
+                }
+                if (live >= s_ourZdoIds.Count)
+                {
+                    Log.LogInfo($"[锚点] 实例化就绪 {live}/{s_ourZdoIds.Count}（等待 {Time.time - t0:F1}s）");
+                    s_instancesReady = true;
+                    yield break;
+                }
+                if (live == last) stable++; else { stable = 0; last = live; }
+                if (stable >= 3)
+                {
+                    Log.LogWarning($"[锚点] 实例化停滞在 {live}/{s_ourZdoIds.Count}（3 秒无增长），按现状继续");
+                    s_instancesReady = true;
+                    yield break;
+                }
+                yield return new WaitForSeconds(1f);
+            }
+            Log.LogWarning($"[锚点] 实例化等待超时（{timeout:F0}s）");
+            s_instancesReady = false;
+        }
+
+        // issue #12：对「本 run 创建的全集」统一位移；首次位移前记录 y 供 Δy 校验
+        private void ApplyShiftOurZdos(float dy)
+        {
+            if (s_initialY.Count == 0)
+                foreach (var id in s_ourZdoIds)
+                {
+                    var z = ZDOMan.instance.GetZDO(id);
+                    if (z != null) s_initialY[id] = z.GetPosition().y;
+                }
+            int shifted = 0, gone = 0;
+            foreach (var id in s_ourZdoIds)
+            {
+                var z = ZDOMan.instance.GetZDO(id);                  // REF: 签名待核
+                if (z == null) { gone++; continue; }
+                Vector3 p = z.GetPosition();
+                z.SetPosition(new Vector3(p.x, p.y + dy, p.z));
+                shifted++;
+            }
+            Log.LogInfo($"[锚点] 位移 {dy:F2}m：{shifted} 件（ZDO 不存在 {gone}）");
         }
 
         // issue #8：测量段拆成无 yield 的普通方法（迭代器的 try/catch 内不许 yield），
@@ -515,13 +638,17 @@ namespace XiBpBuilder
             float cx = (pieces.Min(p=>p.x)+pieces.Max(p=>p.x))/2f;
             float cz = (pieces.Min(p=>p.z)+pieces.Max(p=>p.z))/2f;
             float groundBase = CfgPlatformY.Value - CfgGroundLayerPy.Value;
-            int miss = 0;
+            int miss = 0, rebuilt = 0, rebuildFail = 0;
             foreach (var pc in pieces.OrderBy(p=>p.y))   // ✓DOC: 低→高补建
             {
                 Vector3 world = new Vector3(CfgOriginX.Value+(pc.x-cx), groundBase+pc.y+CfgYOffset.Value, CfgOriginZ.Value+(pc.z-cz));
-                if (!have.Contains(Key(pc.hash, world))) { CreatePiece(pc, world); miss++; }
+                if (!have.Contains(Key(pc.hash, world)))
+                {
+                    miss++;
+                    if (CreatePiece(pc, world)) rebuilt++; else rebuildFail++;   // issue #16①：报实际成功数
+                }
             }
-            Log.LogInfo($"[对账] 命中 {have.Count} / 缺失补建 {miss}");
+            Log.LogInfo($"[对账] 命中 {have.Count} / 缺失补建 {rebuilt} 成功（失败 {rebuildFail}，应补 {miss}）");
         }
         private static string Key(int h, Vector3 p) =>   // ✓DOC: 0.25m 量化，y 也要
             $"{h}|{Mathf.RoundToInt(p.x*4)}|{Mathf.RoundToInt(p.y*4)}|{Mathf.RoundToInt(p.z*4)}";
@@ -540,16 +667,25 @@ namespace XiBpBuilder
         private void SupportDiag()
         {
             // ◐DOC §9.3: 遍历 WearNTear，读 m_support vs GetMinSupport，报告 starved 数
+            // issue #16②：取值域自检——starved=0 无法区分「真没问题」与「反射拿错值」，
+            // 故先验证反射可用，再输出值域与越界计数，让「读错了」变得可判定。
             var getMin = AccessTools.Method(typeof(WearNTear), "GetMinSupport");
-            var refSup = AccessTools.FieldRefAccess<WearNTear, float>("m_support");
-            int starved = 0, total = 0;
+            AccessTools.FieldRef<WearNTear, float> refSup = null;
+            try { refSup = AccessTools.FieldRefAccess<WearNTear, float>("m_support"); }
+            catch (Exception e) { Log.LogError($"[体检] 反射取 m_support 失败（字段名变了?）：{e.Message}——体检输出不可信"); return; }
+            if (getMin == null) { Log.LogError("[体检] 反射取 GetMinSupport 失败（方法名变了?）——体检输出不可信"); return; }
+            int starved = 0, total = 0, domainBad = 0;
+            float lo = float.MaxValue, hi = float.MinValue;
             foreach (var w in WearNTear.GetAllInstances())
             {
                 total++;
                 float sup = refSup(w), min = Convert.ToSingle(getMin.Invoke(w, null));
+                if (float.IsNaN(sup) || float.IsInfinity(sup) || sup < -1f || sup > 100000f) domainBad++;
+                if (sup < lo) lo = sup; if (sup > hi) hi = sup;
                 if (sup < min - 0.001f) starved++;
             }
-            Log.LogInfo($"[体检] WearNTear 共 {total}，支撑不足 {starved}（⚠️瞬时采样会漏，判崩塌看件数时序）");
+            Log.LogInfo($"[体检] WearNTear 共 {total}，支撑不足 {starved}；support 值域 [{lo:F1},{hi:F1}]，"
+                + $"越界 {domainBad}（⚠️瞬时采样会漏，判崩塌看件数时序；值域异常=反射拿错值，issue #16②）");
         }
 
         // ====================================================================
@@ -626,16 +762,42 @@ namespace XiBpBuilder
         private bool IsNatureOrRuin(ZDO z) { /* REF: 名字/prefab 判定，ClearAllInArea=true 时不走这条 */ return true; }
 
         // ---- Terrain 反射助手（REF: 字段/方法名据交接文档 §3.4，签名待核）----
-        private struct HC { public object heightmap; public object terrainComp; public Vector3 worldPos; }
-        private List<HC> FindNearbyHeightmaps(float x, float z, float r) { /* REF: Heightmap.GetAllInstance + 距离筛 */ return new List<HC>(); }
-        private float TargetTerrainY(float wx, float wz, List<Piece> ps) { /* ◐DOC: flat→PlatformY；carve→地下件最低底面 */ return CfgPlatformY.Value; }
+        private struct HC { public Heightmap heightmap; public object terrainComp; public Vector3 worldPos; }
+        // issue #14：原为空桩（返回空表 → TerrainTask 空转还写 flag）。现按真实 API 实现，签名待实机核。
+        private List<HC> FindNearbyHeightmaps(float x, float z, float r)
+        {
+            var list = new List<HC>();
+            foreach (var hm in Heightmap.GetAllInstances())             // REF: 公开静态，待核
+            {
+                if (hm == null) continue;
+                Vector3 p = hm.transform.position;
+                if (Dist2D(p, x, z) > r) continue;
+                var tc = TerrainComp.FindTerrainCompiler(ZoneSystem.instance.GetZone(p));   // REF: 签名待核
+                if (tc == null) { Log.LogWarning($"[地形] heightmap@({p.x:F0},{p.z:F0}) 无 TerrainComp，跳过"); continue; }
+                list.Add(new HC { heightmap = hm, terrainComp = tc, worldPos = p });
+            }
+            return list;
+        }
+        // issue #14：原为空桩。flat → PlatformY；carve → 地下件最低 py 的世界高度 − Embed
+        private float TargetTerrainY(float wx, float wz, List<Piece> ps)
+        {
+            if (!CfgCarve.Value || ps == null || ps.Count == 0) return CfgPlatformY.Value;
+            float groundBase = CfgPlatformY.Value - CfgGroundLayerPy.Value;
+            return groundBase + ps.Min(p => p.y) - CfgEmbed.Value;
+        }
         private static int   GetWidth(object hmap)  => (int)AccessTools.Field(hmap.GetType(), "m_width").GetValue(hmap);
         private static float GetScale(object hmap)  => (float)AccessTools.Field(hmap.GetType(), "m_scale").GetValue(hmap);
         private static float[] GetFloatArray(object t, string f) => (float[])AccessTools.Field(t.GetType(), f).GetValue(t);
         private static bool[]  GetBoolArray (object t, string f) => (bool[]) AccessTools.Field(t.GetType(), f).GetValue(t);
         private static float GetHeight(object hmap, int x, int z) =>
             Convert.ToSingle(AccessTools.Method(hmap.GetType(), "GetHeight").Invoke(hmap, new object[]{ x, z }));
-        private static void  SetHeight(object hmap, int x, int z, float h) { /* REF: m_heights[index]=h */ }
+        // issue #14：原为空桩。m_heights 为 (width+1)² 行主序：index = z*(width+1)+x（布局待核）
+        private static void SetHeight(object hmap, int x, int z, float h)
+        {
+            int w = GetWidth(hmap);
+            var arr = (float[])AccessTools.Field(hmap.GetType(), "m_heights").GetValue(hmap);
+            arr[z * (w + 1) + x] = h;
+        }
         private void RebuildTerrain(object hmap, object tcomp)
         {
             // ✓DOC 调用链：Save(false)→ApplyModifiers→Poke→UpdateCornerDepths→RebuildCollisionMesh→RebuildRenderMesh
@@ -652,16 +814,6 @@ namespace XiBpBuilder
             m?.Invoke(o, args);
         }
 
-        private void ApplyShift(List<WearNTear> our, float dy)   // ◐DOC: 整体位移改 ZDO 位置
-        {
-            foreach (var w in our)
-            {
-                if (w == null) continue;                            // issue #8：已销毁件跳过
-                var nv = w.GetComponent<ZNetView>(); if (nv==null||!nv.IsValid()) continue;
-                var z = nv.GetZDO(); Vector3 p = z.GetPosition();
-                z.SetPosition(new Vector3(p.x, p.y + dy, p.z));
-            }
-        }
         private float PickShiftByMustDie(List<WearNTear> our)   // ◐DOC §8.3/§9.3: 扫档选必死最少、并列取更深
         {
             float best = 0f; int bestDie = int.MaxValue;

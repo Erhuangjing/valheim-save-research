@@ -53,8 +53,13 @@ def load_hashlib():
 
 
 # ---------------------------------------------------------------- 期望侧
-def transform_pieces(manifest, ox, oz, platform_y, ground_py, yoffset, sink):
-    """蓝图局部坐标 → 世界坐标（与参考插件 BuildPieces 同式）。返回带 key 的列表。"""
+def transform_pieces(manifest, ox, oz, platform_y, ground_py, yoffset, sink, ignore_y=False):
+    """蓝图局部坐标 → 世界坐标（与参考插件 BuildPieces 同式）。返回带 key 的列表。
+
+    ignore_y（实测方法论）：位移缺陷会让 y 出 0.25 量化尖刺（+0.25→58 / −0.25→122 /
+    −1.25→1127 件），拿 y 匹配会得出错误的存活率。交叉验证时可用 (hash,x,z) 三元组匹配；
+    坑 C.2 的默认仍含 y（同 (x,z) 叠放多件需 y 区分），两口径都在输出里报告。
+    """
     cx = manifest['bbox_center']['x']
     cz = manifest['bbox_center']['z']
     out = []
@@ -62,15 +67,20 @@ def transform_pieces(manifest, ox, oz, platform_y, ground_py, yoffset, sink):
         wx = ox + (p['x'] - cx)
         wy = (platform_y - ground_py) + p['y'] + yoffset + sink
         wz = oz + (p['z'] - cz)
-        out.append({'name': p['name'], 'hash': p.get('hash') or stable_hash(p['name']),
-                    'x': wx, 'y': wy, 'z': wz,
-                    'key': key_of(p.get('hash') or stable_hash(p['name']), wx, wy, wz)})
+        h = p.get('hash') or stable_hash(p['name'])
+        out.append({'name': p['name'], 'hash': h, 'x': wx, 'y': wy, 'z': wz,
+                    'key': key_of(h, wx, wy, wz, use_y=not ignore_y)})
     return out
 
 
-def key_of(h, x, y, z):
-    """交接文档 §9.4：hash|round(x*4)|round(y*4)|round(z*4)。round 同 C# ToEven。"""
-    return (h, round(x * 4), round(y * 4), round(z * 4))
+def key_of(h, x, y, z, use_y=True):
+    """交接文档 §9.4：hash|round(x*4)|round(y*4)|round(z*4)。round 同 C# ToEven。
+
+    use_y=False → (hash, x, z) 三元组（y 有 0.25 量化尖刺时的交叉验证口径）。
+    """
+    if use_y:
+        return (h, round(x * 4), round(y * 4), round(z * 4))
+    return (h, round(x * 4), round(z * 4))
 
 
 # ---------------------------------------------------------------- 存档侧
@@ -214,13 +224,13 @@ def precise_scan(world_dir):
 
 
 # ---------------------------------------------------------------- 对账
-def reconcile(expected, found_records, margin=15.0):
-    """期望（transform_pieces 输出）vs 扫描记录 → 结果字典。"""
+def reconcile(expected, found_records, margin=15.0, ignore_y=False):
+    """期望（transform_pieces 输出）vs 扫描记录 → 结果字典。expected 的 key 须已按 ignore_y 生成。"""
     exp = collections.Counter(e['key'] for e in expected)
     name_of = {}
     for e in expected:
         name_of[e['key']] = e['name']
-    found = collections.Counter(key_of(h, x, y, z) for h, x, y, z in found_records)
+    found = collections.Counter(key_of(h, x, y, z, use_y=not ignore_y) for h, x, y, z in found_records)
 
     matched = missing = 0
     missing_list = []
@@ -330,6 +340,16 @@ def selftest():
            and len(prec['records']) == 4 and prec['per_chunk'][0]['exact']
            and fulln == 3)
 
+    # E（实测方法论③）：y 出 0.25 尖刺时——含 y 口径必 FAIL，--ignore-y 口径必须 PASS
+    worldE = os.path.join(tmp, 'WE'); os.makedirs(worldE)
+    recsE = [(h, x, y + 0.25, z) for h, x, y, z in recs_of(exp)]     # 全体 y +0.25（量化出桶）
+    _synth_chunk(os.path.join(worldE, '_main.0.chunk'), recsE)
+    foundE, _ = scan_chunks_for_hashes(worldE, {e['hash'] for e in exp})
+    expNoY = [dict(e, key=key_of(e['hash'], e['x'], e['y'], e['z'], use_y=False)) for e in exp]
+    rE1 = reconcile(exp, foundE)                                      # 含 y（默认）
+    rE2 = reconcile(expNoY, foundE, ignore_y=True)                    # 忽略 y
+    okE = (rE1['matched'] < rE1['expected']) and (rE2['matched'] == rE2['expected'])
+
     print('A 全量对账      : matched=%d missing=%d → %s' % (rA['matched'], rA['missing'], 'PASS' if okA else 'FAIL'))
     print('B 缺失+y漂移0.30: matched=%d missing=%d extras=%d → %s'
           % (rB['matched'], rB['missing'], rB['extra_in_bbox_total'], 'PASS' if okB else 'FAIL'))
@@ -337,8 +357,11 @@ def selftest():
     print('D 精确vs全景    : 恒等式%s precise=%d/%d exact=%s full=%d → %s'
           % ('✓' if ident['ok'] else '✗', prec['found'], prec['want'],
              prec['per_chunk'][0]['exact'], fulln, 'PASS' if okD else 'FAIL'))
-    ok = okA and okB and okC and okD
-    print('selftest:', '四案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
+    print('E y尖刺双口径   : 含y %d/%d（应FAIL） 忽略y %d/%d（应全中） → %s'
+          % (rE1['matched'], rE1['expected'], rE2['matched'], rE2['expected'],
+             'PASS' if okE else 'FAIL'))
+    ok = okA and okB and okC and okD and okE
+    print('selftest:', '五案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
     return 0 if ok else 1
 
 
@@ -355,6 +378,9 @@ def main(argv=None):
     ap.add_argument('--sink', type=float, default=0.0, help='锚点求解最终整体位移（有符号，下沉为负）')
     ap.add_argument('--min-rate', type=float, default=1.0, help='达标线（默认 1.0 = 零丢失）')
     ap.add_argument('--margin', type=float, default=15.0, help='extras 判定包围盒外扩（米）')
+    ap.add_argument('--ignore-y', action='store_true',
+                    help='匹配 key 去掉 y（(hash,x,z) 三元组）——y 有 0.25 量化尖刺时的交叉验证口径；'
+                         '默认含 y（坑 C.2：同 (x,z) 可叠放多件）')
     ap.add_argument('--full-scan', action='store_true', help='附加全景扫描（观察用，不可用于验收：识别率≈99.8%，见 full_scan 文档）')
     ap.add_argument('--out', help='结果 JSON 输出路径')
     ap.add_argument('--selftest', action='store_true')
@@ -387,9 +413,11 @@ def main(argv=None):
               % (ident['index'], ident['zones']))
 
     exp = transform_pieces(manifest, a.origin_x, a.origin_z, a.platform_y,
-                           a.ground_py, a.yoffset, a.sink)
+                           a.ground_py, a.yoffset, a.sink, ignore_y=a.ignore_y)
     found, chunk_files = scan_chunks_for_hashes(a.world, {e['hash'] for e in exp})
-    res = reconcile(exp, found, a.margin)
+    res = reconcile(exp, found, a.margin, ignore_y=a.ignore_y)
+    if a.ignore_y:
+        print('⚠ 交叉验证口径：匹配不含 y（--ignore-y）。若本结果 PASS 而含 y 口径 FAIL → 存在 Δy 漂移（issue #12 类缺陷）')
     res['identity'] = ident
     if a.full_scan:
         if a.min_rate >= 1.0:

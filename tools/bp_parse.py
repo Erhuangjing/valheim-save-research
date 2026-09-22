@@ -181,7 +181,11 @@ def parse_blueprint_lines(lines):
 
 
 def parse_vbuild_lines(lines):
-    """.vbuild（BuildShare）：空白分隔 name qx qy qz qw px py pz"""
+    """.vbuild（BuildShare）双方言（issue #17 补方言 2）：
+    方言1（≥8 段）: name qx qy qz qw px py pz [zdoData chance]
+    方言2（5/6 段）: name cos [sin] px py pz —— sin==0 时省略成 5 段（旧 BuildShare）
+    判别特征（实测 longhouse.vbuild）：列数 5/6 且 cos²+sin²≈1；角度为 11.25° 整数倍（仅告警不强判）"""
+    import math as _m
     bp = {'format': 'vbuild', 'name': None, 'creator': None, 'description': None,
           'category': None, 'pieces': [], 'snappoints': [], 'terrain': [],
           'center': None, 'warnings': []}
@@ -193,8 +197,32 @@ def parse_vbuild_lines(lines):
         if ',' in line and not has_dot:      # BuildConverter 的逗号兼容（整行无 . 才替换）
             line = line.replace(',', '.')
         p = line.split()
+        if len(p) in (5, 6):
+            # ---- 方言 2：name cos [sin] px py pz ----
+            try:
+                cos = _f(p[1])
+                sin = _f(p[2]) if len(p) == 6 else 0.0
+                px, py, pz = _f(p[-3]), _f(p[-2]), _f(p[-1])
+            except Exception:
+                bp['warnings'].append('5/6 段行数值解析失败，跳过: %s' % line[:60])
+                continue
+            if abs(cos * cos + sin * sin - 1.0) > 0.01:
+                bp['warnings'].append('5/6 段行但 cos²+sin²≠1（非旋转分量方言），跳过: %s' % line[:60])
+                continue
+            yaw = _m.degrees(_m.atan2(sin, cos)) % 360.0
+            if abs(yaw / 11.25 - round(yaw / 11.25)) > 0.02:
+                bp['warnings'].append('方言2 角度非 11.25° 整数倍（%.2f°），仍按值采用: %s' % (yaw, line[:60]))
+            half = _m.radians(yaw) / 2.0
+            bp['pieces'].append({'name': p[0].split('(')[0], 'category': 'Building',
+                                 'x': px, 'y': py, 'z': pz,
+                                 'qx': 0.0, 'qy': round(_m.sin(half), 6), 'qz': 0.0,
+                                 'qw': round(_m.cos(half), 6),
+                                 'yaw': round(yaw, 4), 'pureYaw': True,
+                                 'info': None, 'scale': [1.0, 1.0, 1.0],
+                                 'zdoData': None, 'chance': None})
+            continue
         if len(p) < 8:
-            bp['warnings'].append('字段不足 8 段，跳过: %s' % line[:60])
+            bp['warnings'].append('字段不足 8 段（也非 5/6 段方言2），跳过: %s' % line[:60])
             continue
         name = p[0].split('(')[0]
         qx, qy, qz, qw = _f(p[1]), _f(p[2]), _f(p[3]), _f(p[4])
@@ -378,6 +406,8 @@ short;line;only
 
 SELFTEST_VBUILD = """stone_floor_2x2 0 0 0 1 0 0 0
 wood_gate(Left) 0 0.7071068 0 0 -2 0 1.5
+wood_wall_45x1 0.7071068 0.7071068 2.5 1.5 -3.5
+wood_floor 1 4 0 0.5
 bad line
 """
 
@@ -435,10 +465,20 @@ def selftest():
 
     print('== .vbuild fixture ==')
     vb = parse_vbuild_lines(SELFTEST_VBUILD.splitlines())
-    check('四元数在前、位置在后', len(vb['pieces']) == 2
+    check('方言1 四元数在前、位置在后', len(vb['pieces']) == 4
           and vb['pieces'][1]['name'] == 'wood_gate'
           and abs(vb['pieces'][1]['x'] + 2) < 1e-6 and abs(vb['pieces'][1]['z'] - 1.5) < 1e-6)
     check('category 固定 Building', all(p['category'] == 'Building' for p in vb['pieces']))
+    d2a, d2b = vb['pieces'][2], vb['pieces'][3]
+    check('方言2 6段（cos sin px py pz）: 45° / 坐标正确',
+          d2a['name'] == 'wood_wall_45x1' and abs(d2a['yaw'] - 45.0) < 0.01
+          and (d2a['x'], d2a['y'], d2a['z']) == (2.5, 1.5, -3.5))
+    check('方言2 5段（sin 省略）: 0° / 坐标正确',
+          d2b['name'] == 'wood_floor' and abs(d2b['yaw']) < 1e-6
+          and (d2b['x'], d2b['y'], d2b['z']) == (4, 0, 0.5))
+    check('方言2 四元数与 yaw 自洽（qy=sin(y/2) qw=cos(y/2)）',
+          abs(d2a['qy'] - 0.3826834) < 1e-4 and abs(d2a['qw'] - 0.9238795) < 1e-4
+          and d2a['pureYaw'])
     check('坏行告警', any('字段不足' in w for w in vb['warnings']))
 
     print('== 输出格式 ==')
@@ -467,6 +507,12 @@ def main(argv):
         return selftest()
 
     bp, src = load_any(a.file)
+    if not bp['pieces']:
+        # issue #17：解析出 0 件 = 格式未识别/文件损坏，必须致命退出（否则 preflight 报 0/0 ok）
+        print('✗ 解析出 0 件（格式未识别或空文件）—— 致命错误，拒绝输出（issue #17）')
+        for w in bp['warnings'][:8]:
+            print('  [warn] %s' % w)
+        return 1
     pieces = [p for p in bp['pieces']
               if (p['category'] in STRUCT_CATS if a.structure_only else True)]
     rep = analyze(bp, structure_only=a.structure_only)

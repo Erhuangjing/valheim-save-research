@@ -13,9 +13,21 @@
 **编译状态**：2026-09-21 实机验证通过（.NET SDK 9.0.313 + Valheim dedicated server 1.0 + BepInEx 5，
 0 警告 0 错误，产物 `bin/Release/XiBpBuilder.dll` 28,672 字节；8 个协程状态机完整——见 PR #1 实测报告）。
 **运行状态**：隔离环境端到端实测通过（清障→落地→保存，1805/1805 零丢失、prefab 校验失败 0、
-坐标公式反推精确吻合）。运行期修掉三处：#7 `LoadPieces` uint32 hash 溢出（60.8% 的真实件超
-int32，原版第 0 步就崩）、#8 `AnchorSolveTask` NRE（null 碰撞体无保护 + 失败静默，现已显式
-报错并声明「自动求解未生效，回退 cfg 手填 YOffset」）、#9 GUID 脱敏副作用（cfg 不通用，见下）。
+坐标公式反推精确吻合）。已修的运行期问题分两轮：
+第一轮（#7 uint32 hash 溢出 / #8 锚点 NRE 静默 / #9 GUID 致 cfg 不通用）；
+第二轮（5 蓝图 8 轮实测，#12~#17）：**#13 Support 默认改 true**（锚点成功≠免磨损，A/B 实测
+false 掉件 3.7%~15.9%、true ±0）、**#12 锚点位移重构**（全集统一位移，见下）、#14 Terrain
+三处空桩补实现 + 空跑不写 flag、#17 `.vbuild` 方言2、#16 三处观测性缺口。
+
+### 已知运行期行为（2026-09-22 第二轮实测后）
+
+| 项 | 行为 | 依据 |
+|---|---|---|
+| `Support.Enabled` | **默认 true**。「锚点成功则不需锁」已被 A/B 实测证伪 | #13 |
+| 锚点位移对象 | **本 run 创建的全集**（`s_ourZdoIds`），等实例化齐后每轮统一位移，结束后全量 Δy 校验；**对账补建路径跳过锚点**（只重建缺失件，整体位移会撕裂建筑，以 cfg `YOffset` 为准） | #12 |
+| ⚠ PatchAll 坑 | `PatchAll(Type)` 只补那一个类，**不是整个程序集**——新增补丁类必须逐个注册；启动时打印 `GetAllPatchedMethods()` 实际挂载数自检 | #13 附 |
+| Terrain | 空桩已补真实实现（`Heightmap.GetAllInstances` / `TerrainComp.FindTerrainCompiler` / `m_heights` 直写，均 REF 待核）；取 0 个 heightmap 或改 0 个顶点都**不写 `terrain_done`** | #14 |
+| 判掉件口径 | 清点 mark ZDO（不用总记录数——会混入掉落物/自然物）；支撑体检输出值域与越界计数（防「反射拿错值」被当真没问题） | #16 |
 初版有 4 处引用/using 层面的编译错误（41 处报错全是级联），已按 issue #2 修复：
 
 | # | 位置 | 修复 |
@@ -83,8 +95,10 @@ cfg，你调好的配置被完全绕开（实测症状：日志落点 = 代码�
 | 原版那份调好的 cfg | 把 `Plugin.cs` 的 `[BepInPlugin("...")]` GUID 改回原版值重编译；或把 cfg 文件改名为 `com.world.bpbuild.cfg` 并逐键核对 |
 | `bp_pipeline.py install` 生成的 cfg | 默认写 `com.world.bpbuild.cfg`；部署真版插件时传 `--cfg-guid <真版GUID>` |
 
-**YOffset 的地位（issue #8）**：锚点自动求解正常时保持 0；**若日志出现「[锚点] 求解失败 /
-自动求解未生效」，YOffset 必须手填**（0 = 贴地硬边界），cfg 注释里已带此提示。
+**YOffset 的地位（issue #8/#12）**：全新建路径锚点自动求解正常时保持 0；**若日志出现
+「[锚点] 求解失败 / 自动求解未生效」，YOffset 必须手填**（0 = 贴地硬边界），cfg 注释里已带
+此提示。**对账补建路径（bp_done 已存在）不跑锚点**——只重建缺失件，整体位移会撕裂建筑，
+该路径下 YOffset 就是唯一的高度来源。
 
 ## 构建（在配好引用的 Windows 机器上）
 

@@ -74,13 +74,18 @@ def _pct(sorted_ys, q):
 
 
 def find_sites(records, tile_w=64.0, tile_d=64.0, water_level=WATER_LEVEL,
-               min_samples=8, max_spread=2.0, top=10):
+               min_samples=8, max_spread=2.0, top=10, max_burial=1.0):
     """records = [(hash, x, y, z)]（bp_reconcile.full_scan 输出）。
 
     返回 (sites, reject_counts)：
-      sites   = [{'site_x','site_z','platform_y','spread','samples','trees','rocks',
-                  'pickables','nature_total','buildings'}, ...] 按 (spread, nature_total) 升序
-      rejects = {'built': n, 'sparse': n, 'water': n, 'slope': n}
+      sites   = [{'site_x','site_z','platform_y','spread','burial_p95','burial_max',
+                  'samples','trees','rocks','pickables','buildings'}, ...]
+                  按 (spread, nature_total) 升序
+      rejects = {'built': n, 'sparse': n, 'water': n, 'slope': n, 'burial': n}
+
+    埋深（issue #15）：样本 p95 高出平台面多少 = 落点地表会「埋」进建筑基线多深。
+    实测掉件率随埋深单调恶化（>0m≈0.2% / 0~1m≈1.5% / 1~2m≈1% / 2~4m≈5% / >4m 6.6~23.5%），
+    默认阈值 1.0m。burial 用 p95 抗单块岩石噪声，同时报告 max。
     """
     samples = []            # (x, y, z, kind)
     builds = []             # (x, z)
@@ -92,7 +97,7 @@ def find_sites(records, tile_w=64.0, tile_d=64.0, water_level=WATER_LEVEL,
             builds.append((x, z))
 
     if not samples:
-        return [], {'built': 0, 'sparse': 0, 'water': 0, 'slope': 0, 'no_samples': 1}
+        return [], {'built': 0, 'sparse': 0, 'water': 0, 'slope': 0, 'burial': 0, 'no_samples': 1}
 
     # 空间分箱
     sbin, bbin = defaultdict(list), defaultdict(list)
@@ -129,18 +134,25 @@ def find_sites(records, tile_w=64.0, tile_d=64.0, water_level=WATER_LEVEL,
                     rejects['water'] += 1
                 else:
                     spread = _pct(ys, 0.95) - _pct(ys, 0.05)
+                    # issue #15：埋深 = 高出平台面的量（p95 抗噪 + max 参考），超阈值否决
+                    # （注意不能用 continue：内层 while 的游标推进在分支链之后，continue 会死循环）
+                    burial_p95 = max(0.0, _pct(ys, 0.95) - med)
+                    burial_max = max(0.0, ys[-1] - med)
                     if spread > max_spread:
                         rejects['slope'] += 1
+                    elif burial_p95 > max_burial:
+                        rejects['burial'] += 1
                     else:
                         sites.append({
-                            'site_x': round(cx, 1), 'site_z': round(cz, 1),
-                            'platform_y': round(med, 2), 'spread': round(spread, 2),
-                            'samples': len(ss),
-                            'trees': sum(1 for s in ss if s[3] == 'tree'),
-                            'rocks': sum(1 for s in ss if s[3] == 'rock'),
-                            'pickables': sum(1 for s in ss if s[3] == 'pickable'),
-                            'buildings': nb,
-                        })
+                        'site_x': round(cx, 1), 'site_z': round(cz, 1),
+                        'platform_y': round(med, 2), 'spread': round(spread, 2),
+                        'burial_p95': round(burial_p95, 2), 'burial_max': round(burial_max, 2),
+                        'samples': len(ss),
+                        'trees': sum(1 for s in ss if s[3] == 'tree'),
+                        'rocks': sum(1 for s in ss if s[3] == 'rock'),
+                        'pickables': sum(1 for s in ss if s[3] == 'pickable'),
+                        'buildings': nb,
+                    })
             cz += step
         cx += step
 
@@ -190,6 +202,11 @@ def selftest():
            and classify('PineTree') == 'tree' and classify('Bush01_raspberry') == 'pickable'
     assert classify('Pickable_Mushroom') == 'pickable' and classify('wood_floor') == 'structure'
 
+    for i in range(28):                                   # F：平地带 + 1.5m 台地（埋深超标区）
+        put('Oak1', 1100 + (i % 7) * 6.5, 40 + rnd.uniform(-0.15, 0.15), 100 + (i // 7) * 6.5)
+    for i in range(10):                                   # ~26% 样本在 +1.5m，横向铺满全区
+        put('Oak1', 1102 + i * 4, 41.5 + rnd.uniform(-0.05, 0.05), 102 + (i % 5) * 8)
+
     sites, rej = find_sites(recs, tile_w=48, tile_d=48)
     okA = bool(sites) and abs(sites[0]['platform_y'] - 40) < 1.0 and sites[0]['spread'] < 0.8 \
         and 90 <= sites[0]['site_x'] <= 170
@@ -204,8 +221,12 @@ def selftest():
     print('C 四类拒绝计数 : slope=%d water=%d built=%d sparse=%d → %s'
           % (rej.get('slope', 0), rej.get('water', 0), rej.get('built', 0), rej.get('sparse', 0),
              'PASS' if okC else 'FAIL'))
-    ok = okA and okB and okC
-    print('selftest:', '三案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
+    okF = rej.get('burial', 0) > 0 and all(s['site_x'] < 1000 for s in sites) \
+        and bool(sites) and 'burial_p95' in sites[0]
+    print('F 埋深否决     : burial 拒绝=%d 合格区无台地混入 → %s'
+          % (rej.get('burial', 0), 'PASS' if okF else 'FAIL'))
+    ok = okA and okB and okC and okF
+    print('selftest:', '四案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
     return 0 if ok else 1
 
 
@@ -217,6 +238,8 @@ def main(argv=None):
     ap.add_argument('--margin', type=float, default=16.0, help='格子=占地+2×margin（默认 16）')
     ap.add_argument('--min-samples', type=int, default=8)
     ap.add_argument('--max-spread', type=float, default=2.0, help='格内 p95-p5 起伏上限（米）')
+    ap.add_argument('--max-burial', type=float, default=1.0,
+                    help='埋深阈值（米，默认 1.0；实测 >1m 掉件率开始上行：1~2m≈1%%、2~4m≈5%%、>4m 6.6~23.5%%）')
     ap.add_argument('--water-level', type=float, default=WATER_LEVEL)
     ap.add_argument('--top', type=int, default=10)
     ap.add_argument('--json', help='结果 JSON 输出路径')
@@ -242,18 +265,19 @@ def main(argv=None):
     records = bp_reconcile.full_scan(a.world, hslib)
     sites, rej = find_sites(records, tile_w=tile_w, tile_d=tile_d,
                             water_level=a.water_level, min_samples=a.min_samples,
-                            max_spread=a.max_spread, top=a.top)
-    print('扫描记录 %d 条 | 格子 %.0f×%.0f m | 判据: 起伏≤%.1fm 水位线 %.0f 样本≥%d'
-          % (len(records), tile_w, tile_d, a.max_spread, a.water_level, a.min_samples))
+                            max_spread=a.max_spread, top=a.top, max_burial=a.max_burial)
+    print('扫描记录 %d 条 | 格子 %.0f×%.0f m | 判据: 起伏≤%.1fm 埋深≤%.1fm 水位线 %.0f 样本≥%d'
+          % (len(records), tile_w, tile_d, a.max_spread, a.max_burial, a.water_level, a.min_samples))
     print('拒绝统计: %s' % (rej or '（无）'))
     if not sites:
         print('✗ 没有合格落点。放宽 --max-spread / --min-samples，或换一片区域（稀疏=少人踩点，'
               '可能反而空旷但无法验平）')
         return 1
-    print('%-14s %-14s %-8s %-7s %-6s %s' % ('site_x', 'site_z', 'PlatformY', '起伏', '样本', '自然物(树/岩/采集)'))
+    print('%-12s %-12s %-10s %-6s %-8s %-8s %-5s %s' % ('site_x', 'site_z', 'PlatformY', '起伏', '埋深p95', '埋深max', '样本', '自然物(树/岩/采集)'))
     for s in sites:
-        print('%-14.1f %-14.1f %-8.2f %-7.2f %-6d %d/%d/%d'
-              % (s['site_x'], s['site_z'], s['platform_y'], s['spread'], s['samples'],
+        print('%-12.1f %-12.1f %-10.2f %-6.2f %-8.2f %-8.2f %-5d %d/%d/%d'
+              % (s['site_x'], s['site_z'], s['platform_y'], s['spread'],
+                 s['burial_p95'], s['burial_max'], s['samples'],
                  s['trees'], s['rocks'], s['pickables']))
     b = sites[0]
     print('推荐落点: (%.1f, %.1f)  PlatformY=%.2f  （又平又干净优先；起服前建议游戏内目视复核一次）'

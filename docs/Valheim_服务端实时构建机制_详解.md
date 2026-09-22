@@ -183,6 +183,7 @@ modifiedHeight[index] = true;
 
 ```
 Heightmap.m_heights      ← 游戏实际使用的高度（只写 delta 的话，地面纹丝不动 = "没生效"）
+                           ⚠ 类型是 List<float>（不是 float[]，issue #19③：显式转 float[] 编译能过、运行抛 InvalidCastException）
 TerrainComp.m_levelDelta ← 相对原始高度的偏移，供存档序列化持久化
 ```
 
@@ -194,6 +195,17 @@ TerrainComp.m_levelDelta ← 相对原始高度的偏移，供存档序列化持
 取 ZNetView 所有权 → TerrainComp.Save(false) → ApplyModifiers() → Poke()
 → UpdateCornerDepths() → RebuildCollisionMesh() → RebuildRenderMesh()
 ```
+
+⚠ **调用对象别搞错（issue #19，反射实测）**：这条链上只有 `Save(bool)` 在 **TerrainComp** 侧，
+`ApplyModifiers` / `Poke` / `UpdateCornerDepths` / `RebuildCollisionMesh` / `RebuildRenderMesh`
+**全在 Heightmap 侧**。参考骨架原来把 `ApplyModifiers` 调在 TerrainComp 上，而
+`AccessTools.Method` 找不到方法时 `m?.Invoke` 会**静默跳过** → 链断一环却不报错。
+写反射调用时务必让「方法不存在」变成一条显式日志。
+
+同理，取 heightmap / TerrainComp 的正确入口是（同为反射实测）：
+`Heightmap.FindHeightmap(Vector3, float, List<Heightmap>)` 或 `Heightmap.GetAllHeightmaps()`（**没有** `GetAllInstances()`）、
+`Heightmap.GetAndCreateTerrainCompiler()`（会创建缺失的 TerrainComp）——
+`ZoneSystem.GetZone` 是静态且返回 zone id，不能喂给 `FindTerrainCompiler`（它要世界坐标）。
 
 ### 5.5 ±8m 硬限 + delta 丢失事故（必须知道的风险）
 

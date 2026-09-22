@@ -83,6 +83,20 @@ def key_of(h, x, y, z, use_y=True):
     return (h, round(x * 4), round(z * 4))
 
 
+def key_xyz(k, ignore_y=False):
+    """key_of 的逆：key → (x, y, z)。
+
+    ⚠️ issue #20：key 的元数**随 ignore_y 变化**（4 元组 / 3 元组），任何按 key 反算坐标的
+    地方都必须走这里，不能直接 `h, qx, qy, qz = k` —— 三元组会被硬解崩（ValueError）。
+    ignore_y 时 y 无法还原，返回 None，调用方须跳过 y 相关判定。
+    """
+    if ignore_y:
+        _, qx, qz = k
+        return qx / 4.0, None, qz / 4.0
+    _, qx, qy, qz = k
+    return qx / 4.0, qy / 4.0, qz / 4.0
+
+
 # ---------------------------------------------------------------- 存档侧
 def _sane(x, y, z):
     return not (math.isnan(x) or math.isnan(z) or math.isnan(y)
@@ -225,7 +239,11 @@ def precise_scan(world_dir):
 
 # ---------------------------------------------------------------- 对账
 def reconcile(expected, found_records, margin=15.0, ignore_y=False):
-    """期望（transform_pieces 输出）vs 扫描记录 → 结果字典。expected 的 key 须已按 ignore_y 生成。"""
+    """期望（transform_pieces 输出）vs 扫描记录 → 结果字典。expected 的 key 须已按 ignore_y 生成。
+
+    ignore_y=True 时 key 是 (hash,x,z) 三元组：匹配与 extras 判定都退化为只按 x/z
+    （y 已被证明不可信，见 transform_pieces 的 0.25 量化尖刺说明）。
+    """
     exp = collections.Counter(e['key'] for e in expected)
     name_of = {}
     for e in expected:
@@ -243,6 +261,8 @@ def reconcile(expected, found_records, margin=15.0, ignore_y=False):
     missing_list.sort(key=lambda d: -d['count'])
 
     # extras：只统计期望包围盒 + margin 内的多出记录（盒外是全世界原有物件，不计）
+    # issue #20：key 元数随 ignore_y 变（3 元组），反算坐标一律走 key_xyz；ignore_y 时
+    # 还原不出 y，extras 判定退化为只按 x/z（此时 y 本来就不可信）。
     xs = [e['x'] for e in expected]; ys = [e['y'] for e in expected]; zs = [e['z'] for e in expected]
     x0, x1 = min(xs) - margin, max(xs) + margin
     y0, y1 = min(ys) - margin, max(ys) + margin
@@ -251,10 +271,12 @@ def reconcile(expected, found_records, margin=15.0, ignore_y=False):
     for k, cnt in found.items():
         if k in exp:
             continue
-        h, qx, qy, qz = k
-        x, y, z = qx / 4.0, qy / 4.0, qz / 4.0
-        if x0 <= x <= x1 and y0 <= y <= y1 and z0 <= z <= z1:
-            extras[k] = cnt
+        x, y, z = key_xyz(k, ignore_y)
+        if not (x0 <= x <= x1 and z0 <= z <= z1):
+            continue
+        if y is not None and not (y0 <= y <= y1):
+            continue
+        extras[k] = cnt
 
     total = sum(exp.values())
     rate = matched / total if total else 1.0
@@ -350,6 +372,18 @@ def selftest():
     rE2 = reconcile(expNoY, foundE, ignore_y=True)                    # 忽略 y
     okE = (rE1['matched'] < rE1['expected']) and (rE2['matched'] == rE2['expected'])
 
+    # F（issue #20）：--ignore-y **且 found 含盒内多余记录** —— extras 分支不能硬解 4 元组。
+    # 修复前：ValueError: not enough values to unpack (expected 4, got 3)。
+    # E 案 found ≡ exp（没有多余记录）→ 永远走不到 extras 分支，所以漏掉了这个崩溃。
+    worldF = os.path.join(tmp, 'WF'); os.makedirs(worldF)
+    movedF = [(h, x + 1.0, y + 0.25, z) for h, x, y, z in recs_of(exp)[:2]]   # x 出 0.25 桶 → ignore_y 下也是多余
+    recsF = ([(h, x, y + 0.25, z) for h, x, y, z in recs_of(exp)] + movedF
+             + [(exp[0]['hash'], 8000.0, 30.0, 8000.0)])                  # 盒外干扰：不计入 extras
+    _synth_chunk(os.path.join(worldF, '_main.0.chunk'), recsF)
+    foundF, _ = scan_chunks_for_hashes(worldF, {e['hash'] for e in exp})
+    rF = reconcile(expNoY, foundF, ignore_y=True)      # ← 修复前在这行抛 ValueError
+    okF = (rF['matched'] == rF['expected'] and rF['extra_in_bbox_total'] == 2)
+
     print('A 全量对账      : matched=%d missing=%d → %s' % (rA['matched'], rA['missing'], 'PASS' if okA else 'FAIL'))
     print('B 缺失+y漂移0.30: matched=%d missing=%d extras=%d → %s'
           % (rB['matched'], rB['missing'], rB['extra_in_bbox_total'], 'PASS' if okB else 'FAIL'))
@@ -360,8 +394,10 @@ def selftest():
     print('E y尖刺双口径   : 含y %d/%d（应FAIL） 忽略y %d/%d（应全中） → %s'
           % (rE1['matched'], rE1['expected'], rE2['matched'], rE2['expected'],
              'PASS' if okE else 'FAIL'))
-    ok = okA and okB and okC and okD and okE
-    print('selftest:', '五案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
+    print('F 忽略y+盒内多余 : 匹配 %d/%d extras=%d（应=2，盒外不计） → %s'
+          % (rF['matched'], rF['expected'], rF['extra_in_bbox_total'], 'PASS' if okF else 'FAIL'))
+    ok = okA and okB and okC and okD and okE and okF
+    print('selftest:', '六案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
     return 0 if ok else 1
 
 
@@ -417,7 +453,8 @@ def main(argv=None):
     found, chunk_files = scan_chunks_for_hashes(a.world, {e['hash'] for e in exp})
     res = reconcile(exp, found, a.margin, ignore_y=a.ignore_y)
     if a.ignore_y:
-        print('⚠ 交叉验证口径：匹配不含 y（--ignore-y）。若本结果 PASS 而含 y 口径 FAIL → 存在 Δy 漂移（issue #12 类缺陷）')
+        print('⚠ 交叉验证口径：匹配不含 y（--ignore-y）。若本结果 PASS 而含 y 口径 FAIL → 存在 Δy 漂移（issue #12 类缺陷）；'
+              '本口径下 extras 判定也退化为只按 x/z（y 不可信）')
     res['identity'] = ident
     if a.full_scan:
         if a.min_rate >= 1.0:

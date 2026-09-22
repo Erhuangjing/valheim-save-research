@@ -339,7 +339,7 @@ namespace XiBpBuilder
                 Log.LogError("[地形] 取到 0 个 Heightmap（落点太远/实现受限）——不写 terrain_done（issue #14）");
                 yield break;
             }
-            int changed = 0;
+            int changed = 0, rebuildBad = 0;
             foreach (var hc in hmaps)
             {
                 var hmap   = hc.heightmap;
@@ -351,6 +351,16 @@ namespace XiBpBuilder
                 var levelDelta  = GetFloatArray(tcomp, "m_levelDelta");    // ✓DOC 字段名
                 var smoothDelta = GetFloatArray(tcomp, "m_smoothDelta");   // ✓DOC
                 var modified    = GetBoolArray(tcomp, "m_modifiedHeight"); // ✓DOC
+
+                // issue #19 验收②：(width+1)² 行主序 + index=z*(width+1)+x 是文档推断、从未实证。
+                // 写入前先做一次「我们写 → 游戏自己的 GetHeight 回读」往返自检；不一致就整段放弃 ——
+                // 宁可不动地形，也不要写坏地形还留个 terrain_done 说做过了。
+                if (!CfgTerrainDryRun.Value && !HeightLayoutVerified(hmap))
+                {
+                    Log.LogError("[地形] ★ m_heights 布局自检失败（index 布局与假设不符）——"
+                        + "本段中止，不写 terrain_done（issue #19）");
+                    yield break;
+                }
 
                 for (int i = 0; i <= width; i++)
                 for (int j = 0; j <= width; j++)
@@ -364,6 +374,8 @@ namespace XiBpBuilder
 
                     float curLocal = GetHeight(hmap, j, i);     // ✓DOC: 参数顺序 (x,z)
                     float tgtLocal = targetY - hpos.y;
+                    // issue #19：DryRun 必须真的不动地形（原来 DryRun=true 也照写 m_heights / delta）
+                    if (CfgTerrainDryRun.Value) { changed++; continue; }
                     // ✓DOC 增量公式
                     float req = levelDelta[index] + smoothDelta[index] + tgtLocal - curLocal;
                     levelDelta[index]  = Mathf.Clamp(req, -CfgMaxDelta.Value, CfgMaxDelta.Value);
@@ -373,14 +385,22 @@ namespace XiBpBuilder
                     SetHeight(hmap, j, i, tgtLocal);
                     changed++;
                 }
-                // ✓DOC 重建调用链（顺序不能乱）
-                RebuildTerrain(hmap, tcomp);
+                // ✓DOC 重建调用链（顺序不能乱）。issue #19：反射目标修正 + 缺方法必须可见
+                if (CfgTerrainDryRun.Value) Log.LogInfo("[地形] DryRun：跳过重建调用链（本次未写入任何改动）");
+                else if (!RebuildTerrain(hmap, tcomp)) rebuildBad++;
+                Log.LogInfo($"[地形] heightmap@({hpos.x:F0},{hpos.z:F0}) width={width} scale={scale:F2} 累计改动 {changed} 顶点");
                 yield return null;
             }
             Log.LogInfo($"[地形] 改动 {changed} 个顶点（DryRun={CfgTerrainDryRun.Value}）");
             if (changed == 0)
             {
                 Log.LogWarning("[地形] 0 个顶点改动——不写 terrain_done（issue #14：空跑不留标志）");
+                yield break;
+            }
+            if (rebuildBad > 0)
+            {
+                Log.LogError($"[地形] ★ {rebuildBad} 个 Heightmap 的重建调用链不完整——改动可能不生效，"
+                    + "不写 terrain_done（issue #19：宁可重跑，也不要假装做过）");
                 yield break;
             }
             if (!CfgTerrainDryRun.Value) WriteFlag("terrain_done");
@@ -761,19 +781,43 @@ namespace XiBpBuilder
             Mathf.Sqrt((p.x-x)*(p.x-x) + (p.z-z)*(p.z-z));
         private bool IsNatureOrRuin(ZDO z) { /* REF: 名字/prefab 判定，ClearAllInArea=true 时不走这条 */ return true; }
 
-        // ---- Terrain 反射助手（REF: 字段/方法名据交接文档 §3.4，签名待核）----
-        private struct HC { public Heightmap heightmap; public object terrainComp; public Vector3 worldPos; }
-        // issue #14：原为空桩（返回空表 → TerrainTask 空转还写 flag）。现按真实 API 实现，签名待实机核。
+        // ---- Terrain 反射助手 ----
+        // issue #19：以下成员名/签名来自对 assembly_valheim.dll 的**反射枚举**（apipeek，绕开
+        // #Strings 堆后缀压缩造成的字符串搜索假阴性），不是文档推断。改动此处前请重新枚举核对。
+        //   static List<Heightmap> Heightmap.GetAllHeightmaps()                              ← 全量
+        //   static void  Heightmap.FindHeightmap(Vector3 point, float radius, List<Heightmap>) ← 按半径筛
+        //   TerrainComp  Heightmap.GetAndCreateTerrainCompiler()            （实例方法，缺失时创建）
+        //   static TerrainComp TerrainComp.FindTerrainCompiler(Vector3 worldPos)（只返回已存在的）
+        //   static Vector2s ZoneSystem.GetZone(Vector3 point)               ← 静态，返回 zone id（不是坐标）
+        //   List<float>  Heightmap.m_heights / int Heightmap.m_width / float Heightmap.m_scale
+        //   TerrainComp: void Save(bool) | Heightmap: ApplyModifiers/Poke/UpdateCornerDepths/
+        //                RebuildCollisionMesh/RebuildRenderMesh
+        private struct HC { public Heightmap heightmap; public TerrainComp terrainComp; public Vector3 worldPos; }
+        // issue #14：原为空桩（返回空表 → TerrainTask 空转还写 flag）。
+        // issue #19①：Heightmap **没有** GetAllInstances()（那是 IMonoUpdater 的 get_Instances()）。
         private List<HC> FindNearbyHeightmaps(float x, float z, float r)
         {
             var list = new List<HC>();
-            foreach (var hm in Heightmap.GetAllInstances())             // REF: 公开静态，待核
+            var hs = new List<Heightmap>();
+            Heightmap.FindHeightmap(new Vector3(x, CfgPlatformY.Value, z), r, hs);   // REF: 半径口径（米）待核
+            if (hs.Count == 0)
+            {
+                // 兜底：半径筛选若按 3D 距离或别的口径，可能一个都筛不到 → 退回全量枚举 + 自己判 2D 距离
+                foreach (var hm in Heightmap.GetAllHeightmaps())
+                    if (hm != null && Dist2D(hm.transform.position, x, z) <= r) hs.Add(hm);
+                if (hs.Count > 0)
+                    Log.LogWarning($"[地形] FindHeightmap 半径筛选返回 0，退回全量枚举得 {hs.Count} 个（半径口径待核）");
+            }
+            foreach (var hm in hs)
             {
                 if (hm == null) continue;
                 Vector3 p = hm.transform.position;
-                if (Dist2D(p, x, z) > r) continue;
-                var tc = TerrainComp.FindTerrainCompiler(ZoneSystem.instance.GetZone(p));   // REF: 签名待核
-                if (tc == null) { Log.LogWarning($"[地形] heightmap@({p.x:F0},{p.z:F0}) 无 TerrainComp，跳过"); continue; }
+                if (Dist2D(p, x, z) > r) continue;                      // 双保险：API 若按 zone 粗筛，这里再收一次
+                // issue #19②：原写法 `TerrainComp.FindTerrainCompiler(ZoneSystem.instance.GetZone(p))` 两过错叠加 ——
+                // 实例访问静态方法（CS0176）+ 传的是 zone id 而非世界坐标（CS1503）。本段就是要改地形，
+                // 所以要的是「会创建缺失 TerrainComp」的那个入口。
+                var tc = hm.GetAndCreateTerrainCompiler();
+                if (tc == null) { Log.LogWarning($"[地形] heightmap@({p.x:F0},{p.z:F0}) 拿不到 TerrainComp，跳过"); continue; }
                 list.Add(new HC { heightmap = hm, terrainComp = tc, worldPos = p });
             }
             return list;
@@ -789,29 +833,80 @@ namespace XiBpBuilder
         private static float GetScale(object hmap)  => (float)AccessTools.Field(hmap.GetType(), "m_scale").GetValue(hmap);
         private static float[] GetFloatArray(object t, string f) => (float[])AccessTools.Field(t.GetType(), f).GetValue(t);
         private static bool[]  GetBoolArray (object t, string f) => (bool[]) AccessTools.Field(t.GetType(), f).GetValue(t);
-        private static float GetHeight(object hmap, int x, int z) =>
-            Convert.ToSingle(AccessTools.Method(hmap.GetType(), "GetHeight").Invoke(hmap, new object[]{ x, z }));
-        // issue #14：原为空桩。m_heights 为 (width+1)² 行主序：index = z*(width+1)+x（布局待核）
+        private static float GetHeight(object hmap, int x, int z)
+        {
+            // issue #19：同名重载可能不止一个（(int,int) 与 (float,float)），AccessTools.Method 不指定
+            // 参数类型时取到哪个没有保证 → 显式优先 (int,int)，找不到再按名字兜底。
+            var m = AccessTools.Method(hmap.GetType(), "GetHeight", new[] { typeof(int), typeof(int) })
+                 ?? AccessTools.Method(hmap.GetType(), "GetHeight");
+            if (m == null) throw new MissingMethodException("Heightmap.GetHeight");
+            return Convert.ToSingle(m.Invoke(hmap, new object[] { x, z }));
+        }
+        // issue #19③：m_heights 是 **List<float>**（交接文档 §3.4 同款）——原来的 (float[]) 显式转换
+        // 编译能过、运行必抛 InvalidCastException。index 布局 (width+1)² 行主序 = z*(width+1)+x
+        // 由 HeightLayoutVerified() 在写入前做运行时往返自检。
         private static void SetHeight(object hmap, int x, int z, float h)
         {
             int w = GetWidth(hmap);
-            var arr = (float[])AccessTools.Field(hmap.GetType(), "m_heights").GetValue(hmap);
-            arr[z * (w + 1) + x] = h;
+            var heights = (List<float>)AccessTools.Field(hmap.GetType(), "m_heights").GetValue(hmap);
+            heights[z * (w + 1) + x] = h;
         }
-        private void RebuildTerrain(object hmap, object tcomp)
+        // issue #19 验收②：布局假设（行主序、index 算法、GetHeight 参数序）从未实证 →
+        // 写入前先挪一个顶点再复原，用游戏自己的 GetHeight(x,z) 双向确认。任一步对不上即判布局不可信。
+        private bool HeightLayoutVerified(object hmap)
         {
+            try
+            {
+                int w = GetWidth(hmap);
+                if (w < 2) { Log.LogError($"[地形] heightmap width={w} 退化，无法做布局自检"); return false; }
+                // 探测点必须 x≠z：(1,1) 这类对称点在「行主序」与「转置」下算出同一个 index，检不出 x/z 转置。
+                int px = 1, pz = 2;
+                float before = GetHeight(hmap, px, pz);
+                float marker = before + 1f;
+                SetHeight(hmap, px, pz, marker);
+                float back = GetHeight(hmap, px, pz);
+                SetHeight(hmap, px, pz, before);                     // 无论成败都复原
+                float restored = GetHeight(hmap, px, pz);
+                bool ok = Mathf.Abs(back - marker) <= 1e-3f && Mathf.Abs(restored - before) <= 1e-3f;
+                Log.LogInfo($"[地形] m_heights 布局自检 width={w} 点({px},{pz})：写 {before:F2}→{marker:F2}，"
+                    + $"回读 {back:F2}，复原 {restored:F2} → "
+                    + (ok ? "一致 ✓" : "不一致 ✗（index 布局或 GetHeight 参数序与假设不符）"));
+                return ok;
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"[地形] m_heights 布局自检异常（List<float>? index 布局?）：{e.Message}");
+                return false;
+            }
+        }
+        // issue #19：重建链的目标对象也得对 —— 反射实测只有 Save(bool) 在 TerrainComp 侧，
+        // ApplyModifiers/Poke/UpdateCornerDepths/RebuildCollisionMesh/RebuildRenderMesh 全在
+        // **Heightmap** 侧。原实现把 ApplyModifiers 调在 tcomp 上，而 `m?.Invoke` 会静默吞掉
+        // 「方法不存在」→ 重建链断一环却不报错。现在缺方法要记名，并让上层拒绝写 terrain_done。
+        private readonly List<string> s_rebuildMissing = new List<string>();
+        private void Miss(object o, string method) => s_rebuildMissing.Add($"{o.GetType().Name}.{method}");
+        private bool RebuildTerrain(Heightmap hmap, TerrainComp tcomp)
+        {
+            s_rebuildMissing.Clear();
             // ✓DOC 调用链：Save(false)→ApplyModifiers→Poke→UpdateCornerDepths→RebuildCollisionMesh→RebuildRenderMesh
-            Invoke(tcomp, "Save", false);
-            Invoke(tcomp, "ApplyModifiers");
-            Invoke(hmap,  "Poke");
-            Invoke(hmap,  "UpdateCornerDepths");
-            Invoke(hmap,  "RebuildCollisionMesh");
-            Invoke(hmap,  "RebuildRenderMesh");
+            if (!TryInvoke(tcomp, "Save", false))       Miss(tcomp, "Save");
+            if (!TryInvoke(hmap, "ApplyModifiers")
+                && !TryInvoke(tcomp, "ApplyModifiers")) Miss(hmap, "ApplyModifiers");   // 兜底：万一在 TerrainComp
+            if (!TryInvoke(hmap, "Poke"))               Miss(hmap, "Poke");
+            if (!TryInvoke(hmap, "UpdateCornerDepths")) Miss(hmap, "UpdateCornerDepths");
+            if (!TryInvoke(hmap, "RebuildCollisionMesh")) Miss(hmap, "RebuildCollisionMesh");
+            if (!TryInvoke(hmap, "RebuildRenderMesh"))  Miss(hmap, "RebuildRenderMesh");
+            if (s_rebuildMissing.Count > 0)
+                Log.LogWarning($"[地形] 重建调用链缺 {s_rebuildMissing.Count} 个方法："
+                    + $"{string.Join(", ", s_rebuildMissing.ToArray())} —— 本次改动可能不生效");
+            return s_rebuildMissing.Count == 0;
         }
-        private static void Invoke(object o, string method, params object[] args)
+        private static bool TryInvoke(object o, string method, params object[] args)
         {
-            var m = AccessTools.Method(o.GetType(), method, args.Length>0 ? new[]{ args[0].GetType() } : null);
-            m?.Invoke(o, args);
+            var m = AccessTools.Method(o.GetType(), method, args.Length > 0 ? new[]{ args[0].GetType() } : null);
+            if (m == null) return false;              // issue #19：不再 `m?.Invoke` 静默吞掉「方法不存在」
+            m.Invoke(o, args);
+            return true;
         }
 
         private float PickShiftByMustDie(List<WearNTear> our)   // ◐DOC §8.3/§9.3: 扫档选必死最少、并列取更深

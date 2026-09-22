@@ -58,15 +58,16 @@ namespace XiBpBuilder
         //  配置（REF: 按交接文档 §5.3 的 cfg 全清单声明，类型/默认值可能有出入）
         // ====================================================================
         // [Build]
-        internal static ConfigEntry<bool>   CfgEnabled, CfgForce, CfgReconcile, CfgPerPieceGround, CfgAutoDetectGround;
+        internal static ConfigEntry<bool>   CfgEnabled, CfgForce, CfgReconcile, CfgPerPieceGround, CfgAutoDetectGround, CfgAutoPlatformY;
         internal static ConfigEntry<float>  CfgOriginX, CfgOriginZ, CfgYOffset, CfgGroundLayerPy, CfgBatchSize, CfgFrameDelay;
         internal static ConfigEntry<string> CfgPieceFile;
         // [Cleanup]
         internal static ConfigEntry<bool>   CfgCleanOn, CfgCleanNature, CfgWaitActivate, CfgOnlyPersistent, CfgClearAllInArea;
         internal static ConfigEntry<float>  CfgC1X, CfgC1Z, CfgR1, CfgProtectX, CfgProtectZ, CfgProtectR;
-        // [Terrain]
-        internal static ConfigEntry<bool>   CfgTerrainOn, CfgCarve, CfgTerrainDryRun;
-        internal static ConfigEntry<float>  CfgEmbed, CfgMaxDelta, CfgMargin, CfgPlatformY;
+        // [Terrain]（PlanBuild 式逐点整地，规则见 TerrainTask 注释）
+        internal static ConfigEntry<bool>   CfgTerrainOn, CfgTerrainDryRun, CfgVerifyOnReload;
+        internal static ConfigEntry<float>  CfgEmbed, CfgMaxDelta, CfgPlatformY, CfgSkirt, CfgSkirtMax, CfgSkirtSlope, CfgPad, CfgCap, CfgLayerTol, CfgClose, CfgSink;
+        internal static ConfigEntry<string> CfgTerrainPaint, CfgTerrainFile, CfgTerrainDump;
         // [Activate]
         internal static ConfigEntry<bool>   CfgActOn;
         internal static ConfigEntry<float>  CfgActX, CfgActY, CfgActZ;
@@ -96,6 +97,9 @@ namespace XiBpBuilder
             CfgBatchSize = Config.Bind("Build", "BatchSize", 60f);
             CfgFrameDelay= Config.Bind("Build", "FrameDelay", 10f);
             CfgPieceFile = Config.Bind("Build", "PieceFile", "bp_pieces.txt");
+            // 落地高度 = 地面层件所在位置的**实测地形**中位数（游戏里量，不再用离线自然物代理值——
+            // 代理值差几米就是「房子比地面高一截、门口跳不上去」）。false = 用 [Terrain] PlatformY 手填值
+            CfgAutoPlatformY = Config.Bind("Build", "AutoPlatformY", true);
 
             CfgCleanOn   = Config.Bind("Cleanup", "Enabled", true);
             CfgCleanNature = Config.Bind("Cleanup", "CleanNature", true);
@@ -109,13 +113,28 @@ namespace XiBpBuilder
             CfgProtectZ = Config.Bind("Cleanup", "ProtectZ", 267f);
             CfgProtectR = Config.Bind("Cleanup", "ProtectRadius", 20f);
 
-            CfgTerrainOn = Config.Bind("Terrain", "Enabled", false);   // ◐DOC: 默认关（首选天然平地，避 delta 丢失）
-            CfgCarve     = Config.Bind("Terrain", "Carve", false);
-            CfgTerrainDryRun = Config.Bind("Terrain", "DryRun", false);
-            CfgEmbed     = Config.Bind("Terrain", "Embed", 0.30f);
-            CfgMaxDelta  = Config.Bind("Terrain", "MaxDelta", 8f);      // ✓DOC: 游戏硬限，别改大
-            CfgMargin    = Config.Bind("Terrain", "Margin", 8f);
-            CfgPlatformY = Config.Bind("Terrain", "PlatformY", 39.40f);
+            CfgTerrainOn = Config.Bind("Terrain", "Enabled", false);
+            CfgTerrainDryRun = Config.Bind("Terrain", "DryRun", false);    // 只算方案、出报告，一个顶点都不写
+            CfgPlatformY = Config.Bind("Terrain", "PlatformY", 39.40f);    // [Build] AutoPlatformY=false 或测不到地形时用
+            CfgEmbed     = Config.Bind("Terrain", "Embed", 0.10f);         // 地表压过件底多深（碰到地形才算接地）
+            CfgSkirt     = Config.Bind("Terrain", "Skirt", 6f);            // 占地外过渡带最小宽度：平滑接回原地形，不留断崖
+            // 过渡带按边界高差自适应加宽：smoothstep 最陡处坡度 = 1.5·Δ/D → D ≥ 1.5·Δ/tan(SkirtSlope)（实测填 3.9m、6m 宽 = 54°）
+            CfgSkirtSlope = Config.Bind("Terrain", "SkirtSlope", 35f);     // 过渡带目标最大坡度（度）：门口要走得上去
+            CfgSkirtMax  = Config.Bind("Terrain", "SkirtMax", 16f);        // 过渡带最大宽度（米）
+            CfgPad       = Config.Bind("Terrain", "Pad", 0.5f);            // 件碰撞体包围盒外扩
+            // 占地闭运算半径：贴地件（斜撑脚/柱脚）之间 ≤ 2·Close 的空隙填成同一块平台（= 玩家先用锄头整出整块房基）；0 = 关
+            CfgClose     = Config.Bind("Terrain", "Close", 3f);
+            // 比平台深 Sink 米以上的非地窖件（打进地里的深桩、下层露台的墙/台阶）不算占地：不给它们整平台，也不挖坑——
+            // 下层露台交给蓝图 #Terrain，地窖交给「floor 件挖到件底」
+            CfgSink      = Config.Bind("Terrain", "Sink", 1f);
+            CfgCap       = Config.Bind("Terrain", "Cap", 1.0f);            // 件底高出平台超过它 = 不贴地（屋檐/二楼），不垫土
+            // 地面层 = py ≤ GroundLayerPy + LayerTol。0.5 会卡在 0.5m 直方图档边界上（skeggoxmanor 主底层 −0.55 被 −1.05+0.5 刷掉）
+            CfgLayerTol  = Config.Bind("Terrain", "LayerTol", 0.6f);
+            CfgMaxDelta  = Config.Bind("Terrain", "MaxDelta", 8f);         // ✓ 游戏硬限 Heightmap.c_LevelMaxDelta：超了整段放弃，不硬改
+            CfgTerrainPaint = Config.Bind("Terrain", "Paint", "Dirt");     // 占地刷泥地（原版锄头整地同款，免得草从地板里长出来）；空 = 不刷
+            CfgTerrainFile  = Config.Bind("Terrain", "EntryFile", "bp_terrain.txt");      // 蓝图 #Terrain 段（PlanBuild 原格式）
+            CfgTerrainDump  = Config.Bind("Terrain", "DumpFile", "bp_terrain_dump.csv");  // 逐顶点 改前/目标/改后，离线出报告用
+            CfgVerifyOnReload = Config.Bind("Terrain", "VerifyOnReload", true);           // 下次起服时复核地形是否持久化
 
             CfgActOn = Config.Bind("Activate", "Enabled", true);        // ✓DOC: 总开关
             CfgActX  = Config.Bind("Activate", "X", -262f);
@@ -246,11 +265,8 @@ namespace XiBpBuilder
             else if (HasFlag("cleanup_done"))
                 Log.LogInfo("[清理] 跳过：cleanup_done 标志存在（重跑 = 删 BepInEx/config/cleanup_done.flag）");  // issue #16③
 
-            // 段3 Terrain（处理地形，默认关；首选天然平地避 delta 丢失）
-            if (CfgTerrainOn.Value && (!HasFlag("terrain_done") || CfgForce.Value))
-                yield return StartCoroutine(TerrainTask(pieces));
-            else if (HasFlag("terrain_done"))
-                Log.LogInfo("[地形] 跳过：terrain_done 标志存在（重跑 = 删该 flag）");  // issue #16③
+            // 落地高度：游戏里实测地形（件还没放，此时量到的就是原地形）；起伏超硬限直接不建
+            if (!ResolvePlatformY(pieces)) { Log.LogError("=== 编排中止：落点不可用（见上），一件没放、一个顶点没改 ==="); yield break; }
 
             // 段4 Build（建房）。issue #12：只有「全新建」才允许锚点整体位移——
             // 对账补建路径只重建缺失件，位移会把新件从旧建筑上撕下来
@@ -265,10 +281,27 @@ namespace XiBpBuilder
             else Log.LogWarning("[落地] 跳过（bp_done 存在且 Reconcile=false），本轮不动件");  // issue #16③
             s_buildDone = true;
 
+            // 段3 Terrain：放在建造**之后**——要按件的真实碰撞体逐点整地（磨损冻结、支撑锁定中，件不会掉）。
+            // 最终状态与「先整地再放件」相同，但件底位置是量出来的，不是按件名猜的。
+            if (CfgTerrainOn.Value && (!HasFlag("terrain_done") || CfgForce.Value))
+            {
+                yield return StartCoroutine(WaitInstancesReady(30f));
+                yield return StartCoroutine(TerrainTask(pieces));
+            }
+            else if (HasFlag("terrain_done"))
+            {
+                Log.LogInfo("[地形] 跳过：terrain_done 标志存在（重跑 = 删该 flag）");  // issue #16③
+                if (CfgVerifyOnReload.Value) yield return StartCoroutine(TerrainVerifyReload());
+            }
+            else if (s_terrainOps.Count > 0)
+                Log.LogWarning($"[地形] ⚠ 蓝图含 {s_terrainOps.Count} 个原版地形件（锄头整地/路面），[Terrain] Enabled=false → 未执行");
+
             // 段5 Anchor（手术窗口内求解 + 整体位移）
             if (CfgAnchorAuto.Value)
             {
-                if (freshBuild)
+                if (s_terrainShaped)
+                    Log.LogInfo("[锚点] 跳过：地形已按件底逐点整好，整体位移只会让件离开刚整好的地面");
+                else if (freshBuild)
                     yield return StartCoroutine(AnchorSolveTask());
                 else
                     Log.LogWarning("[锚点] 跳过：对账补建路径只重建了缺失件，整体位移会撕裂建筑"
@@ -281,7 +314,7 @@ namespace XiBpBuilder
 
             // 段7 Save
             yield return new WaitForSeconds(3f);   // REF: 让实例化稳定
-            TriggerSave();
+            yield return StartCoroutine(SaveAndWait(60f));
 
             if (CfgSupportDiag.Value) SupportDiag();
             Log.LogInfo("=== 编排完成，可停服删 BepInEx ===");
@@ -326,84 +359,216 @@ namespace XiBpBuilder
         }
 
         // ====================================================================
-        //  段3 Terrain（◐DOC: 交接文档 §3.4 公式 + 地形重塑说明 §三 双写）
+        //  落地高度（件放下之前在游戏里实测；同一落点的后续 run 沿用首测值）
         // ====================================================================
+        internal static float s_platformY;
+        private bool ResolvePlatformY(List<Piece> pieces)
+        {
+            // 对账补建 / 重载复核必须沿用首次测得的高度：地形改过之后再测，量到的就不是原地形了
+            string saved = ReadRuntime("PlatformY");
+            if (saved != null && HasFlag("bp_done"))
+            {
+                s_platformY = float.Parse(saved, CultureInfo.InvariantCulture);
+                Log.LogInfo($"★ [落地] PlatformY = {s_platformY:F2}（沿用首次 run 实测值，bp_runtime.txt）");
+                return true;
+            }
+            if (!CfgAutoPlatformY.Value)
+            {
+                s_platformY = CfgPlatformY.Value;
+                Log.LogInfo($"★ [落地] PlatformY = {s_platformY:F2}（手填，AutoPlatformY=false）");
+                WriteRuntime("PlatformY", s_platformY);
+                return true;
+            }
+            float cx = (pieces.Min(p => p.x) + pieces.Max(p => p.x)) / 2f;
+            float cz = (pieces.Min(p => p.z) + pieces.Max(p => p.z)) / 2f;
+            var offs = new List<float>();     // 地面层件：实测地形 − 件 py → 整栋竖直偏移（中位数 = 挖填最少）
+            var nearH = new List<float>();    // 贴地件（地面层往上 Cap 内）：可行性预检用
+            var nearPy = new List<float>();
+            foreach (var pc in pieces)
+            {
+                if (pc.y > CfgGroundLayerPy.Value + CfgLayerTol.Value + CfgCap.Value) continue;
+                if (pc.y < CfgGroundLayerPy.Value - CfgSink.Value) continue;          // 深桩 / 下层结构：不贴原地形，不参与定高与预检
+                var w = new Vector3(CfgOriginX.Value + pc.x - cx, 0f, CfgOriginZ.Value + pc.z - cz);
+                if (!Heightmap.GetHeight(w, out float h)) continue;
+                nearH.Add(h);
+                nearPy.Add(pc.y);
+                if (Mathf.Abs(pc.y - CfgGroundLayerPy.Value) <= CfgLayerTol.Value) offs.Add(h - pc.y);
+            }
+            if (offs.Count == 0)
+            {
+                s_platformY = CfgPlatformY.Value;
+                Log.LogWarning($"[落地] ⚠ 落点处 heightmap 未加载，测不到地形 → 退回手填 PlatformY={s_platformY:F2}");
+                WriteRuntime("PlatformY", s_platformY);
+                return true;
+            }
+            offs.Sort();
+            float baseY = offs[offs.Count / 2];
+            s_platformY = baseY + CfgGroundLayerPy.Value;
+            float dev = 0f;
+            for (int i = 0; i < nearH.Count; i++) dev = Mathf.Max(dev, Mathf.Abs(nearH[i] - (baseY + nearPy[i])));
+            Log.LogInfo($"★ [落地] PlatformY = {s_platformY:F2}（自动：地面层 {offs.Count} 件「实测地形 − 件高」中位数，"
+                + $"偏移范围 {offs[0]:F2}~{offs[offs.Count - 1]:F2}；贴地件处最大高差 {dev:F2}m）");
+            float limit = Mathf.Min(CfgMaxDelta.Value, Heightmap.c_LevelMaxDelta);
+            if (CfgTerrainOn.Value && dev > limit - 1f)
+            {
+                Log.LogError($"[落地] ★ 落点起伏过大：贴地件处地形与平台最大差 {dev:F1}m，逼近/超过游戏地形改造硬限 ±{limit:F0}m"
+                    + "——整地必然出断崖，本次不建。换个更平的落点（bp_autosite）");
+                return false;
+            }
+            if (!CfgTerrainOn.Value && dev > 1.5f)
+                Log.LogWarning($"[落地] ⚠ 未开 [Terrain]，贴地件处原地形起伏 {dev:F1}m → 会有件悬空/埋进土里；建议开 [Terrain]");
+            WriteRuntime("PlatformY", s_platformY);
+            return true;
+        }
+
+        // ====================================================================
+        //  段3 Terrain —— PlanBuild 式逐点整地（在件实例化之后跑：要用件的真实碰撞体）
+        // ====================================================================
+        //  写法照搬 PlanBuild `Blueprints/TerrainTools.cs`（sirskunkalot/PlanBuild，WTFPL）：
+        //    只改 TerrainComp 的 m_levelDelta / m_smoothDelta / m_modifiedHeight（+ m_paintMask），然后
+        //    ClaimOwnership → m_operations++ → Save(false) → Heightmap.Poke(0,false)，高度/碰撞/渲染交给游戏自己重算。
+        //    绝不直写 Heightmap.m_heights：旧实现直写 heights + 自拼 6 步重建链，当场看着对，zone 重载按 delta
+        //    重算就对不上；且不 ClaimOwnership 时 Save 是静默空操作（非 owner 不存盘 = 09-16 delta 丢失事故）。
+        //  旧实现正式服实测的两个致命点：改的是落点 93m 内 7 块 heightmap 的**全部顶点**（~190m 见方压成同一高度，
+        //  ±8m 截断处成斜坡/断崖、与没改的 zone 交界成断层），且不看保护圈。现在只改「占地 + 过渡带」。
+        //
+        //  逐点规则（米；件的位置全部取实测碰撞体包围盒，不按件名猜尺寸/原点）：
+        //    PadY   = 地面层件（落地 y ≤ PlatformY + LayerTol）碰撞体底面中位数 + Embed
+        //    占地   = 底面 ≤ PadY + Cap 的件，xz 包围盒外扩 Pad；地表 = clamp(该点最低件底 + Embed, PadY, PadY + Cap)
+        //             → 比平台略高的件（Cap 内）垫土接住；打进地里的柱子/墙脚直接埋，不挖坑
+        //    地窖   = 名字含 floor、底面 < PadY − 0.5 的件：挖到件底 + Embed（只挖件自身范围，墙体挡土）
+        //    过渡带 = 占地外 Skirt 米：目标 = 最近占地点高度，权重 smoothstep(1 − d/Skirt)，平滑接回原地形
+        //    蓝图 #Terrain = PlanBuild 放置时的 LevelTerrain（circle/square、smooth、paint）原样叠在后面
+        //    原版地形件（mud_road 等：vbuild 蓝图的「地形段」）= 交给原版 TerrainComp.DoOperation
+        //  放弃条件（一个顶点都不写）：满权重顶点落进保护圈，或需改 > MaxDelta（游戏硬限 ±8m）
+        // ====================================================================
+        internal static bool s_terrainShaped;
+        private static readonly List<TerrainOpPiece> s_terrainOps = new List<TerrainOpPiece>();
+        private struct TerrainOpPiece { public GameObject prefab; public Vector3 pos; public Quaternion rot; }
+
         private IEnumerator TerrainTask(List<Piece> pieces)
         {
-            Log.LogInfo("[地形] 开始（Mode=flat / Carve=" + CfgCarve.Value + "）");
-            // 目标：把落点整平到 PlatformY（+ 可选按地下结构开挖）
-            var hmaps = FindNearbyHeightmaps(CfgOriginX.Value, CfgOriginZ.Value, 93f);
-            Log.LogInfo($"[地形] 落点 93m 内取用 {hmaps.Count} 个 Heightmap");
-            if (hmaps.Count == 0)
+            s_terrainShaped = false;
+            string missing = TerrainReflectionMissing();
+            if (missing != null)
             {
-                Log.LogError("[地形] 取到 0 个 Heightmap（落点太远/实现受限）——不写 terrain_done（issue #14）");
+                Log.LogError($"[地形] ★ 反射取不到 {missing}（游戏更新改名了?）——本段放弃，不写 terrain_done");
                 yield break;
             }
-            int changed = 0, rebuildBad = 0;
-            foreach (var hc in hmaps)
-            {
-                var hmap   = hc.heightmap;
-                var tcomp  = hc.terrainComp;
-                var hpos   = hc.worldPos;                       // heightmap 中心世界坐标
-                int width  = GetWidth(hmap);                    // ◐DOC: m_width，反射
-                float scale= GetScale(hmap);                    // ◐DOC: m_scale，反射
-                float half = width * scale * 0.5f;
-                var levelDelta  = GetFloatArray(tcomp, "m_levelDelta");    // ✓DOC 字段名
-                var smoothDelta = GetFloatArray(tcomp, "m_smoothDelta");   // ✓DOC
-                var modified    = GetBoolArray(tcomp, "m_modifiedHeight"); // ✓DOC
+            TerrainPlan plan;
+            try { plan = BuildTerrainPlan(pieces); }
+            catch (Exception e) { Log.LogError($"[地形] ★ 生成整地方案异常：{e}"); yield break; }
+            if (plan == null) yield break;                         // 原因已在方案里报过
 
-                // issue #19 验收②：(width+1)² 行主序 + index=z*(width+1)+x 是文档推断、从未实证。
-                // 写入前先做一次「我们写 → 游戏自己的 GetHeight 回读」往返自检；不一致就整段放弃 ——
-                // 宁可不动地形，也不要写坏地形还留个 terrain_done 说做过了。
-                if (!CfgTerrainDryRun.Value && !HeightLayoutVerified(hmap))
+            float limit = Mathf.Min(CfgMaxDelta.Value, Heightmap.c_LevelMaxDelta);
+            List<TcWrite> writes;
+            try { writes = PlanWrites(plan, limit); }
+            catch (Exception e) { Log.LogError($"[地形] ★ 预演写入异常：{e}"); yield break; }
+            Log.LogInfo($"[地形] 方案：{plan.ops.Count} 个顶点（占地 {plan.nFoot} / 地窖 {plan.nDig} / 过渡带 {plan.nSkirt} / "
+                + $"#Terrain {plan.nEntryVerts}←{plan.nEntries} 条），涉及 {writes.Count} 个 TerrainComp；PadY={plan.padY:F2}；"
+                + $"过渡带被保护圈截断 {plan.protSoft} 点、截到 ±{limit:F0}m {plan.clampedSoft} 点");
+            if (plan.protHard > 0 || plan.over > 0)
+            {
+                if (plan.protHard > 0)
+                    Log.LogError($"[地形] ★ 占地/蓝图地形有 {plan.protHard} 个顶点落在保护圈内（{CfgProtectX.Value},{CfgProtectZ.Value} r={CfgProtectR.Value}）"
+                        + "——房子压到保护区了，一个顶点都不改。挪落点或缩小保护圈");
+                if (plan.over > 0)
+                    Log.LogError($"[地形] ★ {plan.over} 个满权重顶点需改超过 ±{limit:F0}m（游戏硬限），例：{plan.overSample}"
+                        + "——硬改必成断崖，一个顶点都不改。换更平的落点");
+                yield break;
+            }
+            if (CfgTerrainDryRun.Value)
+            {
+                WriteTerrainDump(plan, false);
+                Log.LogInfo("[地形] DryRun：方案与改前高度已写 dump，一个顶点都没改");
+                yield break;
+            }
+
+            foreach (var k in plan.protect)
+                if (!plan.before.ContainsKey(k) && Heightmap.GetHeight(new Vector3(KX(k), 0f, KZ(k)), out float h0)) plan.before[k] = h0;
+            // 一旦开始写，地形就是按件「当前位置」整的：之后无论验收过不过，都不许再做锚点整体位移
+            s_terrainShaped = true;
+            try { CommitWrites(writes); }
+            catch (Exception e) { Log.LogError($"[地形] ★ 写入异常（可能已部分写入，不写 terrain_done，重跑会重算）：{e}"); yield break; }
+            yield return StartCoroutine(WaitRegen(writes.Select(w => w.hm).ToList()));
+
+            int vops = 0;
+            if (s_terrainOps.Count > 0)
+            {
+                // 原版锄头件要在上面那次重算之后再做：原版 LevelTerrain 读的是 heightmap 当前高度
+                foreach (var t in s_terrainOps)
                 {
-                    Log.LogError("[地形] ★ m_heights 布局自检失败（index 布局与假设不符）——"
-                        + "本段中止，不写 terrain_done（issue #19）");
-                    yield break;
+                    if (ApplyVanillaTerrainOp(t, plan)) vops++;
+                    if (vops % 20 == 19) yield return null;
                 }
+                Log.LogInfo($"[地形] 原版地形件（锄头整地/路面）执行 {vops}/{s_terrainOps.Count} 个");
+                yield return StartCoroutine(WaitRegen(null));
+            }
 
-                for (int i = 0; i <= width; i++)
-                for (int j = 0; j <= width; j++)
+            // 验收：满权重顶点的实际高度 vs 目标；占地露缝（地表比该点最低件底低 >0.15m）
+            var after = WriteTerrainDump(plan, true);
+            var errs = new List<float>();
+            foreach (var kv in plan.ops)
+            {
+                if (kv.Value.w < 0.999f || plan.vanillaTouched.Contains(kv.Key)) continue;
+                if (after.TryGetValue(kv.Key, out float h)) errs.Add(Mathf.Abs(h - kv.Value.a));
+            }
+            errs.Sort();
+            float p95 = errs.Count > 0 ? errs[(int)(errs.Count * 0.95f)] : 0f, emax = errs.Count > 0 ? errs[errs.Count - 1] : 0f;
+            // 露缝：占地顶点的地表比该点最低件底低 >0.15m = 地基露出来（正式服「房子一半地基漏出来」那种）。
+            // 叠在梁/斜撑上的地板本来就不贴地，不算问题——所以按顶点上的最低件判，不按每个件判
+            int gaps = 0, footN = 0;
+            foreach (var kv in plan.minBottom)
+            {
+                if (plan.vanillaTouched.Contains(kv.Key) || !plan.role.TryGetValue(kv.Key, out char rr) || rr == 'E'
+                    || !after.TryGetValue(kv.Key, out float h)) continue;
+                footN++;
+                if (h < kv.Value - 0.15f) gaps++;
+            }
+            Log.LogInfo($"★ [地形] 完成：改 {plan.ops.Count} 个顶点；满权重顶点误差 p95={p95:F3} max={emax:F3}m；"
+                + $"占地 {footN} 个顶点中露缝 {gaps} 个；dump → {CfgTerrainDump.Value}");
+            if (errs.Count == 0 || emax > 0.5f)
+            {
+                Log.LogError($"[地形] ★ 验收不过（{(errs.Count == 0 ? "读不回高度" : $"最大误差 {emax:F2}m > 0.5m")}）——不写 terrain_done");
+                yield break;
+            }
+            WriteFlag("terrain_done");
+        }
+
+        // 第二次起服（terrain_done 已在）：按 dump 复核地形是否真的持久化（09-16 事故就是重载后 delta 丢了）
+        private IEnumerator TerrainVerifyReload()
+        {
+            string path = Path.Combine(Paths.ConfigPath, CfgTerrainDump.Value);
+            if (!File.Exists(path)) { Log.LogInfo("[地形] 重载复核：没有 dump 文件，跳过"); yield break; }
+            yield return null;
+            var all = File.ReadAllLines(path);
+            var meta = all.Where(l => l.StartsWith("#")).ToList();          // 首行 # 元数据原样保留
+            var lines = all.Where(l => !l.StartsWith("#")).ToArray();
+            if (lines.Length < 2) yield break;
+            var head = lines[0].Split(',').ToList();
+            int ix = head.IndexOf("x"), iz = head.IndexOf("z"), ia = head.IndexOf("after");
+            if (ix < 0 || iz < 0 || ia < 0) { Log.LogWarning("[地形] 重载复核：dump 缺 x/z/after 列"); yield break; }
+            var errs = new List<float>();
+            int lost = 0;
+            int keep = head.Contains("reload") ? head.IndexOf("reload") : head.Count;   // 重复复核：覆盖旧的 reload 列
+            var outL = new List<string> { string.Join(",", head.Take(keep)) + ",reload" };
+            for (int n = 1; n < lines.Length; n++)
+            {
+                var f = lines[n].Split(',');
+                string cell = "";
+                if (f.Length > ia && f[ia].Length > 0)
                 {
-                    // ✓DOC 顶点坐标公式（无 +0.5）
-                    float wx = hpos.x - half + j * scale;
-                    float wz = hpos.z - half + i * scale;
-                    float targetY = TargetTerrainY(wx, wz, pieces);   // ◐DOC: flat→PlatformY；carve→按地下件
-                    if (float.IsNaN(targetY)) continue;
-                    int index = i * (width + 1) + j;
-
-                    float curLocal = GetHeight(hmap, j, i);     // ✓DOC: 参数顺序 (x,z)
-                    float tgtLocal = targetY - hpos.y;
-                    // issue #19：DryRun 必须真的不动地形（原来 DryRun=true 也照写 m_heights / delta）
-                    if (CfgTerrainDryRun.Value) { changed++; continue; }
-                    // ✓DOC 增量公式
-                    float req = levelDelta[index] + smoothDelta[index] + tgtLocal - curLocal;
-                    levelDelta[index]  = Mathf.Clamp(req, -CfgMaxDelta.Value, CfgMaxDelta.Value);
-                    smoothDelta[index] = 0f;
-                    modified[index]    = true;
-                    // ✓DOC(地形重塑§三): heights 也要写，否则"没生效"。本地高度 = targetY - hpos.y
-                    SetHeight(hmap, j, i, tgtLocal);
-                    changed++;
+                    if (Heightmap.GetHeight(new Vector3(Inv(f[ix]), 0f, Inv(f[iz])), out float h))
+                    { errs.Add(Mathf.Abs(h - Inv(f[ia]))); cell = h.ToString("F3", CultureInfo.InvariantCulture); }
+                    else lost++;
                 }
-                // ✓DOC 重建调用链（顺序不能乱）。issue #19：反射目标修正 + 缺方法必须可见
-                if (CfgTerrainDryRun.Value) Log.LogInfo("[地形] DryRun：跳过重建调用链（本次未写入任何改动）");
-                else if (!RebuildTerrain(hmap, tcomp)) rebuildBad++;
-                Log.LogInfo($"[地形] heightmap@({hpos.x:F0},{hpos.z:F0}) width={width} scale={scale:F2} 累计改动 {changed} 顶点");
-                yield return null;
+                outL.Add(string.Join(",", f.Take(keep)) + "," + cell);
             }
-            Log.LogInfo($"[地形] 改动 {changed} 个顶点（DryRun={CfgTerrainDryRun.Value}）");
-            if (changed == 0)
-            {
-                Log.LogWarning("[地形] 0 个顶点改动——不写 terrain_done（issue #14：空跑不留标志）");
-                yield break;
-            }
-            if (rebuildBad > 0)
-            {
-                Log.LogError($"[地形] ★ {rebuildBad} 个 Heightmap 的重建调用链不完整——改动可能不生效，"
-                    + "不写 terrain_done（issue #19：宁可重跑，也不要假装做过）");
-                yield break;
-            }
-            if (!CfgTerrainDryRun.Value) WriteFlag("terrain_done");
+            File.WriteAllLines(path, meta.Concat(outL));
+            errs.Sort();
+            float mx = errs.Count > 0 ? errs[errs.Count - 1] : float.NaN, p95 = errs.Count > 0 ? errs[(int)(errs.Count * 0.95f)] : float.NaN;
+            Log.LogInfo($"★ [地形] 重载复核：{errs.Count} 个顶点与落地当时比 |Δ| p95={p95:F3} max={mx:F3}m（未加载 {lost}）→ "
+                + (errs.Count > 0 && mx < 0.05f ? "持久化 ✓" : "✗ 地形与落地当时不一致（delta 丢失?）"));
         }
 
         // ====================================================================
@@ -417,15 +582,20 @@ namespace XiBpBuilder
             float minX = pieces.Min(p=>p.x), maxX = pieces.Max(p=>p.x);
             float minZ = pieces.Min(p=>p.z), maxZ = pieces.Max(p=>p.z);
             cx = (minX+maxX)/2f; cz = (minZ+maxZ)/2f;
-            float groundBase = CfgPlatformY.Value - CfgGroundLayerPy.Value;   // ◐DOC: H_base 反推
+            float groundBase = s_platformY - CfgGroundLayerPy.Value;   // PlatformY 已在游戏里实测（ResolvePlatformY）
 
             int batch = 0, created = 0, fail = 0;
+            s_terrainOps.Clear();
             foreach (var pc in pieces.OrderBy(p => p.y))   // ✓DOC: 按 py 低→高，先地基后上层
             {
                 Vector3 world = new Vector3(
                     CfgOriginX.Value + (pc.x - cx),
                     groundBase + pc.y + CfgYOffset.Value,
                     CfgOriginZ.Value + (pc.z - cz));
+                // 原版地形件（锄头整地 mud_road / 路面 paved_road…）不是建筑：建成 ZDO 会被反复实例化、反复改地形。
+                // 按原版做法当「地形操作」在地形段执行（PlanBuild 放置蓝图时也是直接实例化让 TerrainOp 自己跑）
+                var top = TerrainOpPrefab(pc.hash, pc.name);
+                if (top != null) { s_terrainOps.Add(new TerrainOpPiece { prefab = top, pos = world, rot = pc.rot }); continue; }
                 if (CreatePiece(pc, world)) { created++; } else { fail++; }
 
                 if (++batch % (int)CfgBatchSize.Value == 0)
@@ -440,7 +610,8 @@ namespace XiBpBuilder
                     + "不写 bp_done 标志（issue #17：避免后续运行静默跳过整个 Build 段）");
                 yield break;
             }
-            Log.LogInfo($"★ 落地完成：{created} 件，prefab 校验失败 {fail} 次");
+            Log.LogInfo($"★ 落地完成：{created} 件，prefab 校验失败 {fail} 次"
+                + (s_terrainOps.Count > 0 ? $"（另有 {s_terrainOps.Count} 个原版地形件交给地形段执行）" : ""));
             WriteFlag("bp_done");
         }
 
@@ -657,12 +828,15 @@ namespace XiBpBuilder
             }
             float cx = (pieces.Min(p=>p.x)+pieces.Max(p=>p.x))/2f;
             float cz = (pieces.Min(p=>p.z)+pieces.Max(p=>p.z))/2f;
-            float groundBase = CfgPlatformY.Value - CfgGroundLayerPy.Value;
+            float groundBase = s_platformY - CfgGroundLayerPy.Value;
             int miss = 0, rebuilt = 0, rebuildFail = 0;
+            s_terrainOps.Clear();
             foreach (var pc in pieces.OrderBy(p=>p.y))   // ✓DOC: 低→高补建
             {
                 Vector3 world = new Vector3(CfgOriginX.Value+(pc.x-cx), groundBase+pc.y+CfgYOffset.Value, CfgOriginZ.Value+(pc.z-cz));
-                if (!have.Contains(Key(pc.hash, world)))
+                var top = TerrainOpPrefab(pc.hash, pc.name);    // 原版地形件本来就不留 ZDO，不算缺失（terrain_done 缺时交给地形段重做）
+                if (top != null) { s_terrainOps.Add(new TerrainOpPiece { prefab = top, pos = world, rot = pc.rot }); continue; }
+                if (!Present(have, pc.hash, world))
                 {
                     miss++;
                     if (CreatePiece(pc, world)) rebuilt++; else rebuildFail++;   // issue #16①：报实际成功数
@@ -672,16 +846,40 @@ namespace XiBpBuilder
         }
         private static string Key(int h, Vector3 p) =>   // ✓DOC: 0.25m 量化，y 也要
             $"{h}|{Mathf.RoundToInt(p.x*4)}|{Mathf.RoundToInt(p.y*4)}|{Mathf.RoundToInt(p.z*4)}";
+        // 精确 key 会把落在 0.25m 档边界上的件（存档 float 往返后舍入到隔壁档）误判为缺失 → 重复补建
+        //（2026-09-23 实测：第二次起服走对账路径，3117 件里 177 件被重复建了一遍）。同 hash、三轴各 ±1 档内有 ZDO 即算在
+        private static bool Present(HashSet<string> have, int h, Vector3 p)
+        {
+            int qx = Mathf.RoundToInt(p.x * 4), qy = Mathf.RoundToInt(p.y * 4), qz = Mathf.RoundToInt(p.z * 4);
+            for (int dx = -1; dx <= 1; dx++)
+            for (int dy = -1; dy <= 1; dy++)
+            for (int dz = -1; dz <= 1; dz++)
+                if (have.Contains($"{h}|{qx + dx}|{qy + dy}|{qz + dz}")) return true;
+            return false;
+        }
 
         // ====================================================================
         //  段7 Save（✓DOC: 反射 DelayedSave(true)；SaveWorldAndPlayerProfiles 会 NRE）
         // ====================================================================
-        private void TriggerSave()
+        // 等 DelayedSave 协程真正跑完再往下走：「编排完成」之后外部随时可以停服（实测 Ctrl+Break 停不掉，只能强停）
+        private IEnumerator SaveAndWait(float timeout)
         {
             var m = AccessTools.Method(typeof(ZNet), "DelayedSave");   // REF: 返回协程
-            if (m == null) { Log.LogWarning("[保存] 找不到 DelayedSave"); return; }
+            if (m == null) { Log.LogWarning("[保存] 找不到 DelayedSave"); yield break; }
             var coro = m.Invoke(ZNet.instance, new object[] { true }) as IEnumerator;
-            if (coro != null) { StartCoroutine(coro); Log.LogInfo("[保存] 已触发 DelayedSave(true)"); }
+            if (coro == null) { Log.LogWarning("[保存] DelayedSave 未返回协程"); yield break; }
+            bool done = false;
+            StartCoroutine(Then(coro, () => done = true));
+            Log.LogInfo("[保存] 已触发 DelayedSave(true)");
+            float t0 = Time.time;
+            while (!done && Time.time - t0 < timeout) yield return null;
+            if (done) Log.LogInfo($"[保存] 存档写盘完成（{Time.time - t0:F1}s）");
+            else Log.LogWarning($"[保存] ⚠ {timeout:F0}s 内没等到存档协程结束——停服前请确认已存盘");
+        }
+        private IEnumerator Then(IEnumerator inner, Action after)
+        {
+            yield return StartCoroutine(inner);
+            after();
         }
 
         private void SupportDiag()
@@ -781,134 +979,562 @@ namespace XiBpBuilder
             Mathf.Sqrt((p.x-x)*(p.x-x) + (p.z-z)*(p.z-z));
         private bool IsNatureOrRuin(ZDO z) { /* REF: 名字/prefab 判定，ClearAllInArea=true 时不走这条 */ return true; }
 
-        // ---- Terrain 反射助手 ----
-        // issue #19：以下成员名/签名来自对 assembly_valheim.dll 的**反射枚举**（apipeek，绕开
-        // #Strings 堆后缀压缩造成的字符串搜索假阴性），不是文档推断。改动此处前请重新枚举核对。
-        //   static List<Heightmap> Heightmap.GetAllHeightmaps()                              ← 全量
-        //   static void  Heightmap.FindHeightmap(Vector3 point, float radius, List<Heightmap>) ← 按半径筛
-        //   TerrainComp  Heightmap.GetAndCreateTerrainCompiler()            （实例方法，缺失时创建）
-        //   static TerrainComp TerrainComp.FindTerrainCompiler(Vector3 worldPos)（只返回已存在的）
-        //   static Vector2s ZoneSystem.GetZone(Vector3 point)               ← 静态，返回 zone id（不是坐标）
-        //   List<float>  Heightmap.m_heights / int Heightmap.m_width / float Heightmap.m_scale
-        //   TerrainComp: void Save(bool) | Heightmap: ApplyModifiers/Poke/UpdateCornerDepths/
-        //                RebuildCollisionMesh/RebuildRenderMesh
-        private struct HC { public Heightmap heightmap; public TerrainComp terrainComp; public Vector3 worldPos; }
-        // issue #14：原为空桩（返回空表 → TerrainTask 空转还写 flag）。
-        // issue #19①：Heightmap **没有** GetAllInstances()（那是 IMonoUpdater 的 get_Instances()）。
-        private List<HC> FindNearbyHeightmaps(float x, float z, float r)
+        // ---- Terrain 助手（PlanBuild 式）----
+        // 反射成员 2026-09-23 对 assembly_valheim.dll 逐个核对可见性（改动前请重新核对，#19/#22 的教训）：
+        //   TerrainComp（全 private）: float[] m_levelDelta/m_smoothDelta, bool[] m_modifiedHeight/m_modifiedPaint,
+        //     Color[] m_paintMask, int m_operations, Vector3 m_lastOpPoint, float m_lastOpRadius,
+        //     void Save(bool paintOnly), void DoOperation(Vector3 pos, Vector3 rot, TerrainOp.Settings)
+        //   Heightmap: private List<float> m_heights；其余用到的（m_width/m_scale/IsDistantLod/Poke(int,bool)/
+        //     VertexMaskToWorld/GetAndCreateTerrainCompiler/HaveQueuedRebuild/static GetHeight/c_LevelMaxDelta/m_paintMask*）均 public
+        private static readonly FieldInfo FiHeights = AccessTools.Field(typeof(Heightmap), "m_heights");
+        private static readonly FieldInfo FiLevel   = AccessTools.Field(typeof(TerrainComp), "m_levelDelta");
+        private static readonly FieldInfo FiSmooth  = AccessTools.Field(typeof(TerrainComp), "m_smoothDelta");
+        private static readonly FieldInfo FiModH    = AccessTools.Field(typeof(TerrainComp), "m_modifiedHeight");
+        private static readonly FieldInfo FiPaint   = AccessTools.Field(typeof(TerrainComp), "m_paintMask");
+        private static readonly FieldInfo FiModP    = AccessTools.Field(typeof(TerrainComp), "m_modifiedPaint");
+        private static readonly FieldInfo FiOps     = AccessTools.Field(typeof(TerrainComp), "m_operations");
+        private static readonly FieldInfo FiLastPt  = AccessTools.Field(typeof(TerrainComp), "m_lastOpPoint");
+        private static readonly FieldInfo FiLastR   = AccessTools.Field(typeof(TerrainComp), "m_lastOpRadius");
+        private static readonly MethodInfo MiSave   = AccessTools.Method(typeof(TerrainComp), "Save", new[] { typeof(bool) });
+        private static readonly MethodInfo MiDoOp   = AccessTools.Method(typeof(TerrainComp), "DoOperation",
+                                                        new[] { typeof(Vector3), typeof(Vector3), typeof(TerrainOp.Settings) });
+
+        private static string TerrainReflectionMissing()
         {
-            var list = new List<HC>();
-            var hs = new List<Heightmap>();
-            Heightmap.FindHeightmap(new Vector3(x, CfgPlatformY.Value, z), r, hs);   // REF: 半径口径（米）待核
-            if (hs.Count == 0)
+            string[] names = { "Heightmap.m_heights", "TerrainComp.m_levelDelta", "TerrainComp.m_smoothDelta",
+                               "TerrainComp.m_modifiedHeight", "TerrainComp.m_paintMask", "TerrainComp.m_modifiedPaint",
+                               "TerrainComp.m_operations", "TerrainComp.m_lastOpPoint", "TerrainComp.m_lastOpRadius",
+                               "TerrainComp.Save(bool)" };
+            object[] got = { FiHeights, FiLevel, FiSmooth, FiModH, FiPaint, FiModP, FiOps, FiLastPt, FiLastR, MiSave };
+            var miss = names.Where((n, i) => got[i] == null).ToList();
+            return miss.Count == 0 ? null : string.Join(", ", miss);
+        }
+
+        private struct VOp { public float a, w; }      // 复合后的「目标高度 a、权重 w」：h' = h + w(a − h)
+        private class PBox { public string name; public float pivotY; public Bounds b; public bool floor; }
+        private class TerrainPlan
+        {
+            public readonly Dictionary<long, VOp> ops = new Dictionary<long, VOp>();
+            public readonly Dictionary<long, char> role = new Dictionary<long, char>();   // P 占地 / B 地窖 / S 过渡带 / E #Terrain
+            public readonly Dictionary<long, string> paint = new Dictionary<long, string>();
+            public readonly Dictionary<long, float> before = new Dictionary<long, float>();
+            public readonly Dictionary<long, float> minBottom = new Dictionary<long, float>();   // 占地顶点上最低件底（验收露缝用）
+            public readonly HashSet<long> vanillaTouched = new HashSet<long>();
+            public readonly HashSet<long> protect = new HashSet<long>();         // 本该改、因在保护圈内而跳过的顶点（dump 记 X，独立复核没动）
+            public List<PBox> boxes;
+            public float padY, skirt;
+            public int nFoot, nDig, nSkirt, nFilled, nEntries, nEntryVerts, protHard, protSoft, over, clampedSoft;
+            public string overSample = "";
+        }
+        private static long VKey(int x, int z) => ((long)x << 32) | (uint)z;
+        private static int KX(long k) => (int)(k >> 32);
+        private static int KZ(long k) => unchecked((int)(uint)k);
+
+        // 顺序施加两次「拉向目标」的精确复合（PlanBuild 的 LevelTerrain 本质就是 h += w(a − h)）：
+        //   先 (a1,w1) 再 (a2,w2) ≡ 一次 (A,W)：W = 1 − (1−w1)(1−w2)，A = (a1·w1·(1−w2) + a2·w2) / W
+        // 所以整份方案对每个顶点只写一次 delta，不依赖 Poke 之后 heights 何时刷新。
+        private static void Compose(TerrainPlan p, long k, float a, float w, char role)
+        {
+            if (w <= 1e-4f) return;
+            if (p.ops.TryGetValue(k, out var o))
             {
-                // 兜底：半径筛选若按 3D 距离或别的口径，可能一个都筛不到 → 退回全量枚举 + 自己判 2D 距离
-                foreach (var hm in Heightmap.GetAllHeightmaps())
-                    if (hm != null && Dist2D(hm.transform.position, x, z) <= r) hs.Add(hm);
-                if (hs.Count > 0)
-                    Log.LogWarning($"[地形] FindHeightmap 半径筛选返回 0，退回全量枚举得 {hs.Count} 个（半径口径待核）");
+                float W = 1f - (1f - o.w) * (1f - w);
+                p.ops[k] = new VOp { a = (o.a * o.w * (1f - w) + a * w) / W, w = W };
             }
-            foreach (var hm in hs)
+            else p.ops[k] = new VOp { a = a, w = w };
+            p.role[k] = role;
+        }
+
+        // 本工具件（mark==1）在蓝图范围内的实测碰撞体。issue #8/#16 的「无碰撞体」多数是碰撞体挂在子物体上 → 取整棵子树
+        private List<PBox> MeasureOurPieces(float halfX, float halfZ, out int noCollider)
+        {
+            var list = new List<PBox>();
+            noCollider = 0;
+            float ox = CfgOriginX.Value, oz = CfgOriginZ.Value;
+            foreach (var w in WearNTear.GetAllInstances())
             {
-                if (hm == null) continue;
-                Vector3 p = hm.transform.position;
-                if (Dist2D(p, x, z) > r) continue;                      // 双保险：API 若按 zone 粗筛，这里再收一次
-                // issue #19②：原写法 `TerrainComp.FindTerrainCompiler(ZoneSystem.instance.GetZone(p))` 两过错叠加 ——
-                // 实例访问静态方法（CS0176）+ 传的是 zone id 而非世界坐标（CS1503）。本段就是要改地形，
-                // 所以要的是「会创建缺失 TerrainComp」的那个入口。
-                var tc = hm.GetAndCreateTerrainCompiler();
-                if (tc == null) { Log.LogWarning($"[地形] heightmap@({p.x:F0},{p.z:F0}) 拿不到 TerrainComp，跳过"); continue; }
-                list.Add(new HC { heightmap = hm, terrainComp = tc, worldPos = p });
+                if (w == null) continue;
+                var nv = w.GetComponent<ZNetView>();
+                if (nv == null || !nv.IsValid() || nv.GetZDO().GetInt(CfgMarkKey.Value, 0) != 1) continue;
+                Vector3 p = w.transform.position;
+                if (Mathf.Abs(p.x - ox) > halfX + 3f || Mathf.Abs(p.z - oz) > halfZ + 3f) continue;
+                bool any = false;
+                var b = new Bounds();
+                foreach (var c in w.GetComponentsInChildren<Collider>())
+                {
+                    if (c == null || !c.enabled || c.isTrigger) continue;
+                    if (!any) { b = c.bounds; any = true; } else b.Encapsulate(c.bounds);
+                }
+                if (!any) { noCollider++; continue; }
+                string name = w.gameObject.name.Replace("(Clone)", "");
+                list.Add(new PBox { name = name, pivotY = p.y, b = b,
+                                    floor = name.IndexOf("floor", StringComparison.OrdinalIgnoreCase) >= 0 });
             }
             return list;
         }
-        // issue #14：原为空桩。flat → PlatformY；carve → 地下件最低 py 的世界高度 − Embed
-        private float TargetTerrainY(float wx, float wz, List<Piece> ps)
+
+        private TerrainPlan BuildTerrainPlan(List<Piece> pieces)
         {
-            if (!CfgCarve.Value || ps == null || ps.Count == 0) return CfgPlatformY.Value;
-            float groundBase = CfgPlatformY.Value - CfgGroundLayerPy.Value;
-            return groundBase + ps.Min(p => p.y) - CfgEmbed.Value;
-        }
-        private static int   GetWidth(object hmap)  => (int)AccessTools.Field(hmap.GetType(), "m_width").GetValue(hmap);
-        private static float GetScale(object hmap)  => (float)AccessTools.Field(hmap.GetType(), "m_scale").GetValue(hmap);
-        private static float[] GetFloatArray(object t, string f) => (float[])AccessTools.Field(t.GetType(), f).GetValue(t);
-        private static bool[]  GetBoolArray (object t, string f) => (bool[]) AccessTools.Field(t.GetType(), f).GetValue(t);
-        private static float GetHeight(object hmap, int x, int z)
-        {
-            // issue #19：同名重载可能不止一个（(int,int) 与 (float,float)），AccessTools.Method 不指定
-            // 参数类型时取到哪个没有保证 → 显式优先 (int,int)，找不到再按名字兜底。
-            var m = AccessTools.Method(hmap.GetType(), "GetHeight", new[] { typeof(int), typeof(int) })
-                 ?? AccessTools.Method(hmap.GetType(), "GetHeight");
-            if (m == null) throw new MissingMethodException("Heightmap.GetHeight");
-            return Convert.ToSingle(m.Invoke(hmap, new object[] { x, z }));
-        }
-        // issue #19③：m_heights 是 **List<float>**（交接文档 §3.4 同款）——原来的 (float[]) 显式转换
-        // 编译能过、运行必抛 InvalidCastException。index 布局 (width+1)² 行主序 = z*(width+1)+x
-        // 由 HeightLayoutVerified() 在写入前做运行时往返自检。
-        private static void SetHeight(object hmap, int x, int z, float h)
-        {
-            int w = GetWidth(hmap);
-            var heights = (List<float>)AccessTools.Field(hmap.GetType(), "m_heights").GetValue(hmap);
-            heights[z * (w + 1) + x] = h;
-        }
-        // issue #19 验收②：布局假设（行主序、index 算法、GetHeight 参数序）从未实证 →
-        // 写入前先挪一个顶点再复原，用游戏自己的 GetHeight(x,z) 双向确认。任一步对不上即判布局不可信。
-        private bool HeightLayoutVerified(object hmap)
-        {
-            try
+            float bx0 = pieces.Min(p => p.x), bx1 = pieces.Max(p => p.x), bz0 = pieces.Min(p => p.z), bz1 = pieces.Max(p => p.z);
+            float cx = (bx0 + bx1) / 2f, cz = (bz0 + bz1) / 2f;
+            var plan = new TerrainPlan { boxes = MeasureOurPieces((bx1 - bx0) / 2f, (bz1 - bz0) / 2f, out int noCol) };
+            var ground = plan.boxes.Where(q => Mathf.Abs(q.pivotY - s_platformY) <= CfgLayerTol.Value)
+                                   .Select(q => q.b.min.y).OrderBy(y => y).ToList();
+            Log.LogInfo($"[地形] 开始：实测本工具件碰撞体 {plan.boxes.Count} 个（无碰撞体 {noCol}），地面层 {ground.Count} 个");
+            if (ground.Count == 0)
             {
-                int w = GetWidth(hmap);
-                if (w < 2) { Log.LogError($"[地形] heightmap width={w} 退化，无法做布局自检"); return false; }
-                // 探测点必须 x≠z：(1,1) 这类对称点在「行主序」与「转置」下算出同一个 index，检不出 x/z 转置。
-                int px = 1, pz = 2;
-                float before = GetHeight(hmap, px, pz);
-                float marker = before + 1f;
-                SetHeight(hmap, px, pz, marker);
-                float back = GetHeight(hmap, px, pz);
-                SetHeight(hmap, px, pz, before);                     // 无论成败都复原
-                float restored = GetHeight(hmap, px, pz);
-                bool ok = Mathf.Abs(back - marker) <= 1e-3f && Mathf.Abs(restored - before) <= 1e-3f;
-                Log.LogInfo($"[地形] m_heights 布局自检 width={w} 点({px},{pz})：写 {before:F2}→{marker:F2}，"
-                    + $"回读 {back:F2}，复原 {restored:F2} → "
-                    + (ok ? "一致 ✓" : "不一致 ✗（index 布局或 GetHeight 参数序与假设不符）"));
-                return ok;
+                Log.LogError("[地形] ★ 一个地面层件的碰撞体都没测到（未实例化?）——本段放弃，不写 terrain_done");
+                return null;
             }
-            catch (Exception e)
+            float embed = CfgEmbed.Value, padY = ground[ground.Count / 2] + embed, capY = padY + CfgCap.Value;
+            plan.padY = padY;
+
+            // ① 占地 / 地窖：碰撞体包围盒逐点栅格化（地形顶点在整数世界坐标，scale = 1）
+            var foot = new Dictionary<long, float>();
+            var dig = new Dictionary<long, float>();
+            foreach (var q in plan.boxes)
             {
-                Log.LogError($"[地形] m_heights 布局自检异常（List<float>? index 布局?）：{e.Message}");
-                return false;
+                if (q.b.min.y > capY) continue;                                    // 屋檐 / 二楼：不贴地，不垫土
+                float t = Mathf.Clamp(q.b.min.y + embed, padY, capY);
+                bool cellar = q.floor && q.b.min.y < padY - 0.5f;
+                if (!cellar && q.b.min.y < padY - CfgSink.Value) continue;          // 深桩 / 下层露台：不整平台不挖坑
+                int x0 = Mathf.CeilToInt(q.b.min.x - CfgPad.Value), x1 = Mathf.FloorToInt(q.b.max.x + CfgPad.Value);
+                int z0 = Mathf.CeilToInt(q.b.min.z - CfgPad.Value), z1 = Mathf.FloorToInt(q.b.max.z + CfgPad.Value);
+                for (int x = x0; x <= x1; x++)
+                for (int z = z0; z <= z1; z++)
+                {
+                    long k = VKey(x, z);
+                    foot[k] = foot.TryGetValue(k, out float f) ? Mathf.Min(f, t) : t;
+                    plan.minBottom[k] = plan.minBottom.TryGetValue(k, out float mb) ? Mathf.Min(mb, q.b.min.y) : q.b.min.y;
+                    if (cellar && x >= q.b.min.x && x <= q.b.max.x && z >= q.b.min.z && z <= q.b.max.z)
+                        dig[k] = dig.TryGetValue(k, out float d) ? Mathf.Min(d, q.b.min.y + embed) : q.b.min.y + embed;
+                }
+            }
+            if (foot.Count == 0) { Log.LogError("[地形] ★ 占地为空（贴地件全被 Cap 排除?）——本段放弃"); return null; }
+
+            // ② 平台 H = 占地 F 的闭运算（先膨胀 Close 再腐蚀 Close）：贴地件之间的空隙也整平到 PadY
+            int gx0 = int.MaxValue, gx1 = int.MinValue, gz0 = int.MaxValue, gz1 = int.MinValue;
+            foreach (var k in foot.Keys)
+            {
+                int x = KX(k), z = KZ(k);
+                if (x < gx0) gx0 = x; if (x > gx1) gx1 = x; if (z < gz0) gz0 = z; if (z > gz1) gz1 = z;
+            }
+            float close = Mathf.Max(0f, CfgClose.Value), skirtMax = Mathf.Max(CfgSkirt.Value, CfgSkirtMax.Value);
+            int M = Mathf.CeilToInt(close + skirtMax) + 2;
+            gx0 -= M; gx1 += M; gz0 -= M; gz1 += M;
+            int nx = gx1 - gx0 + 1, nz = gz1 - gz0 + 1;
+            var dist = new float[nx * nz];
+            var nearT = new float[nx * nz];
+            var hard = new float[nx * nz];                        // 平台目标高度；NaN = 不在平台内
+            for (int i = 0; i < dist.Length; i++) { dist[i] = float.MaxValue; hard[i] = float.NaN; }
+            foreach (var kv in foot)
+            {
+                int i = (KX(kv.Key) - gx0) * nz + (KZ(kv.Key) - gz0);
+                dist[i] = 0f;
+                hard[i] = kv.Value;
+            }
+            if (close > 0f)
+            {
+                Chamfer(dist, nearT, nx, nz);                     // 到 F 的距离 → 膨胀 D = {dist ≤ close}
+                var outD = new float[nx * nz];
+                var dummy = new float[nx * nz];
+                for (int i = 0; i < outD.Length; i++) outD[i] = dist[i] <= close ? float.MaxValue : 0f;
+                Chamfer(outD, dummy, nx, nz);                     // 到 D 外的距离 → 腐蚀
+                int filled = 0;
+                for (int i = 0; i < outD.Length; i++)
+                    if (float.IsNaN(hard[i]) && outD[i] > close + 0.01f
+                        && !InProtectCircle(new Vector3(gx0 + i / nz, 0f, gz0 + i % nz)))   // 填补不进保护圈（圈伸进建筑凹口时）
+                    { hard[i] = padY; filled++; }
+                plan.nFilled = filled;
+                for (int i = 0; i < dist.Length; i++) dist[i] = float.IsNaN(hard[i]) ? float.MaxValue : 0f;
+            }
+            for (int i = 0; i < dist.Length; i++) if (!float.IsNaN(hard[i])) nearT[i] = hard[i];
+
+            // 过渡带宽度：按平台边界上「目标 − 现地形」的最大高差 Δ 自适应（smoothstep 最陡处坡度 = 1.5·Δ/D）
+            float edgeD = 0f;
+            for (int ix = 1; ix < nx - 1; ix++)
+            for (int iz = 1; iz < nz - 1; iz++)
+            {
+                int i = ix * nz + iz;
+                if (float.IsNaN(hard[i])) continue;
+                if (!float.IsNaN(hard[i + nz]) && !float.IsNaN(hard[i - nz]) && !float.IsNaN(hard[i + 1]) && !float.IsNaN(hard[i - 1])) continue;
+                if (Heightmap.GetHeight(new Vector3(gx0 + ix, 0f, gz0 + iz), out float h0)) edgeD = Mathf.Max(edgeD, Mathf.Abs(hard[i] - h0));
+            }
+            float skirt = plan.skirt = Mathf.Clamp(1.5f * edgeD / Mathf.Tan(Mathf.Clamp(CfgSkirtSlope.Value, 5f, 80f) * Mathf.Deg2Rad),
+                                                   CfgSkirt.Value, skirtMax);
+            Log.LogInfo($"[地形] 平台 = 占地 {foot.Count} + 闭运算填补 {plan.nFilled} 个顶点；边界最大高差 {edgeD:F2}m → "
+                + $"过渡带宽 {skirt:F1}m（目标坡度 ≤ {CfgSkirtSlope.Value:F0}°）");
+            Chamfer(dist, nearT, nx, nz);
+
+            // ③ 方案：占地 / 地窖满权重；过渡带 smoothstep（两端斜率为 0，不起棱）
+            string footPaint = (CfgTerrainPaint.Value ?? "").Trim();
+            for (int ix = 0; ix < nx; ix++)
+            for (int iz = 0; iz < nz; iz++)
+            {
+                int i = ix * nz + iz;
+                float d = dist[i];
+                if (d >= skirt) continue;
+                int x = gx0 + ix, z = gz0 + iz;
+                long k = VKey(x, z);
+                bool isHard = d <= 0f;
+                if (InProtectCircle(new Vector3(x, 0f, z))) { if (isHard) plan.protHard++; else plan.protSoft++; plan.protect.Add(k); continue; }
+                if (isHard)
+                {
+                    bool isDig = dig.TryGetValue(k, out float dg);
+                    Compose(plan, k, isDig ? dg : hard[i], 1f, isDig ? 'B' : 'P');
+                    if (isDig) plan.nDig++; else plan.nFoot++;
+                    if (footPaint.Length > 0) plan.paint[k] = footPaint;
+                }
+                else
+                {
+                    float s = 1f - d / skirt;
+                    Compose(plan, k, nearT[i], s * s * (3f - 2f * s) * ProtectFade(x, z), 'S');
+                    plan.nSkirt++;
+                }
+            }
+
+            // ④ 蓝图 #Terrain：照 PlanBuild PlacementComponent.PlaceBlueprint（坐标变换与件完全一致）
+            float baseY = s_platformY - CfgGroundLayerPy.Value;
+            foreach (var e in LoadTerrainEntries())
+            {
+                bool square = e.shape.Equals("square", StringComparison.OrdinalIgnoreCase);
+                if (!square && !e.shape.Equals("circle", StringComparison.OrdinalIgnoreCase))
+                {
+                    Log.LogWarning($"[地形] #Terrain 未知 shape={e.shape}，跳过（PlanBuild 同样只认 circle/square）");
+                    continue;
+                }
+                float ex = CfgOriginX.Value + e.x - cx, ez = CfgOriginZ.Value + e.z - cz, ey = baseY + e.y;
+                int ccx = Mathf.FloorToInt(ex + 0.5f), ccz = Mathf.FloorToInt(ez + 0.5f);   // = Heightmap.WorldToVertex 的取整
+                float r = Mathf.Max(e.radius, 0.01f), ang = e.rotation * Mathf.Deg2Rad, co = Mathf.Cos(ang), si = Mathf.Sin(ang);
+                int R = Mathf.CeilToInt(r * 1.4143f) + 1;
+                for (int dx = -R; dx <= R; dx++)
+                for (int dz = -R; dz <= R; dz++)
+                {
+                    float D;
+                    if (square)
+                    {
+                        float u = co * dx - si * dz, v = si * dx + co * dz;          // PlanBuild TerrainTools.GetX/GetY
+                        if (Mathf.Abs(u) > r || Mathf.Abs(v) > r) continue;
+                        D = Mathf.Max(Mathf.Abs(u), Mathf.Abs(v)) / r;
+                    }
+                    else
+                    {
+                        float dd = Mathf.Sqrt(dx * dx + dz * dz);
+                        if (dd > r) continue;
+                        D = dd / r;
+                    }
+                    float m = (1f - D) >= e.smooth ? 1f : (1f - D) / e.smooth;       // PlanBuild CalculateSmooth
+                    int x = ccx + dx, z = ccz + dz;
+                    long k = VKey(x, z);
+                    if (InProtectCircle(new Vector3(x, 0f, z))) { if (m >= 0.999f) plan.protHard++; else plan.protSoft++; plan.protect.Add(k); continue; }
+                    Compose(plan, k, ey, m * ProtectFade(x, z), 'E');
+                    plan.nEntryVerts++;
+                    if (e.paint.Length > 0) plan.paint[k] = e.paint;
+                }
+                plan.nEntries++;
+            }
+            return plan;
+        }
+
+        // 保护圈外 3m 内把过渡带 / #Terrain 权重平滑压到 0：圈内原样不动，圈边也不留台阶
+        private float ProtectFade(int x, int z)
+        {
+            if (CfgProtectR.Value <= 0f) return 1f;
+            float d = Dist2D(new Vector3(x, 0f, z), CfgProtectX.Value, CfgProtectZ.Value) - CfgProtectR.Value;
+            if (d >= 3f) return 1f;
+            if (d <= 0f) return 0f;
+            float t = d / 3f;
+            return t * t * (3f - 2f * t);
+        }
+
+        // 两遍倒角距离变换（1 / √2 权重，与欧氏距离误差 < 8%），同时把最近源点的目标高度一路带过去
+        private static void Chamfer(float[] dist, float[] nearT, int nx, int nz)
+        {
+            for (int pass = 0; pass < 2; pass++)
+            {
+                int s = pass == 0 ? 1 : -1;
+                for (int a = 0; a < nx; a++)
+                for (int b = 0; b < nz; b++)
+                {
+                    int ix = pass == 0 ? a : nx - 1 - a, iz = pass == 0 ? b : nz - 1 - b, i = ix * nz + iz;
+                    Relax(dist, nearT, nx, nz, i, ix - s, iz, 1f);
+                    Relax(dist, nearT, nx, nz, i, ix, iz - s, 1f);
+                    Relax(dist, nearT, nx, nz, i, ix - s, iz - s, 1.41421356f);
+                    Relax(dist, nearT, nx, nz, i, ix - s, iz + s, 1.41421356f);
+                }
             }
         }
-        // issue #19：重建链的目标对象也得对 —— 反射实测只有 Save(bool) 在 TerrainComp 侧，
-        // ApplyModifiers/Poke/UpdateCornerDepths/RebuildCollisionMesh/RebuildRenderMesh 全在
-        // **Heightmap** 侧。原实现把 ApplyModifiers 调在 tcomp 上，而 `m?.Invoke` 会静默吞掉
-        // 「方法不存在」→ 重建链断一环却不报错。现在缺方法要记名，并让上层拒绝写 terrain_done。
-        private readonly List<string> s_rebuildMissing = new List<string>();
-        private void Miss(object o, string method) => s_rebuildMissing.Add($"{o.GetType().Name}.{method}");
-        private bool RebuildTerrain(Heightmap hmap, TerrainComp tcomp)
+        private static void Relax(float[] dist, float[] nearT, int nx, int nz, int i, int jx, int jz, float c)
         {
-            s_rebuildMissing.Clear();
-            // ✓DOC 调用链：Save(false)→ApplyModifiers→Poke→UpdateCornerDepths→RebuildCollisionMesh→RebuildRenderMesh
-            if (!TryInvoke(tcomp, "Save", false))       Miss(tcomp, "Save");
-            if (!TryInvoke(hmap, "ApplyModifiers")
-                && !TryInvoke(tcomp, "ApplyModifiers")) Miss(hmap, "ApplyModifiers");   // 兜底：万一在 TerrainComp
-            if (!TryInvoke(hmap, "Poke", 0, false))     Miss(hmap, "Poke");   // issue #22：实测签名 Poke(int delayed, bool paintOnly)
-            if (!TryInvoke(hmap, "UpdateCornerDepths")) Miss(hmap, "UpdateCornerDepths");
-            if (!TryInvoke(hmap, "RebuildCollisionMesh")) Miss(hmap, "RebuildCollisionMesh");
-            if (!TryInvoke(hmap, "RebuildRenderMesh"))  Miss(hmap, "RebuildRenderMesh");
-            if (s_rebuildMissing.Count > 0)
-                Log.LogWarning($"[地形] 重建调用链缺 {s_rebuildMissing.Count} 个方法："
-                    + $"{string.Join(", ", s_rebuildMissing.ToArray())} —— 本次改动可能不生效");
-            return s_rebuildMissing.Count == 0;
+            if (jx < 0 || jz < 0 || jx >= nx || jz >= nz) return;
+            int j = jx * nz + jz;
+            if (dist[j] + c < dist[i]) { dist[i] = dist[j] + c; nearT[i] = nearT[j]; }
         }
-        private static bool TryInvoke(object o, string method, params object[] args)
+
+        // 蓝图 #Terrain 段（PlanBuild TerrainModEntry 原格式：shape;x;y;z;radius;rotation;smooth;paint）
+        private struct TEntry { public string shape, paint; public float x, y, z, radius, smooth; public int rotation; }
+        private List<TEntry> LoadTerrainEntries()
         {
-            // issue #22：参数类型必须按完整列表匹配。原来只取 args[0] → 多参方法永远配不上；无参时传 null
-            // 又等于「任取一个同名重载」→ 拿到带参的 Poke 再按 0 个参数 Invoke，直接抛 TargetParameterCountException。
-            var m = AccessTools.Method(o.GetType(), method, Type.GetTypeArray(args));
-            if (m == null) return false;              // issue #19：不再 `m?.Invoke` 静默吞掉「方法不存在」
-            m.Invoke(o, args);
+            var list = new List<TEntry>();
+            string path = Path.Combine(Paths.ConfigPath, CfgTerrainFile.Value);
+            if (!File.Exists(path)) return list;
+            foreach (var raw in File.ReadAllLines(path))
+            {
+                var s = raw.Trim();
+                if (s.Length == 0 || s.StartsWith("#")) continue;
+                var f = s.Split(';');
+                if (f.Length < 8) { Log.LogWarning($"[地形] #Terrain 行字段不足 8 段，跳过：{s}"); continue; }
+                try
+                {
+                    list.Add(new TEntry { shape = f[0].Trim(), x = Inv(f[1]), y = Inv(f[2]), z = Inv(f[3]), radius = Inv(f[4]),
+                                          rotation = (int)Inv(f[5]), smooth = Inv(f[6]), paint = f[7].Trim() });
+                }
+                catch (Exception e) { Log.LogWarning($"[地形] #Terrain 行解析失败，跳过：{s}（{e.Message}）"); }
+            }
+            return list;
+        }
+        private static float Inv(string s) =>
+            float.Parse(s.Trim().Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture);
+
+        // 预演：算出每个 TerrainComp 要写的 delta（先不写）。跨 zone 边界的共享顶点，两侧 TerrainComp 各写一份 → 不留缝
+        private class TcWrite
+        {
+            public Heightmap hm; public TerrainComp tc;
+            public readonly List<int> idx = new List<int>(); public readonly List<float> lvl = new List<float>();
+            public readonly List<int> pidx = new List<int>(); public readonly List<Color> pcol = new List<Color>();
+        }
+        private List<TcWrite> PlanWrites(TerrainPlan plan, float limit)
+        {
+            int x0 = int.MaxValue, x1 = int.MinValue, z0 = int.MaxValue, z1 = int.MinValue;
+            foreach (var k in plan.ops.Keys)
+            {
+                int x = KX(k), z = KZ(k);
+                if (x < x0) x0 = x; if (x > x1) x1 = x; if (z < z0) z0 = z; if (z > z1) z1 = z;
+            }
+            var hms = new List<Heightmap>();
+            Heightmap.FindHeightmap(new Vector3((x0 + x1) / 2f, 0f, (z0 + z1) / 2f), Mathf.Max(x1 - x0, z1 - z0) * 0.75f + 2f, hms);
+            var writes = new List<TcWrite>();
+            foreach (var hm in hms)
+            {
+                if (hm == null || hm.IsDistantLod) continue;
+                var heights = (List<float>)FiHeights.GetValue(hm);
+                int w = hm.m_width;
+                float sc = hm.m_scale;
+                Vector3 hp = hm.transform.position;
+                TcWrite tw = null;
+                float[] L = null, Sd = null;
+                for (int i = 0; i <= w; i++)
+                for (int j = 0; j <= w; j++)
+                {
+                    long k = VKey(Mathf.RoundToInt(hp.x + (j - w / 2) * sc), Mathf.RoundToInt(hp.z + (i - w / 2) * sc));
+                    if (!plan.ops.TryGetValue(k, out var op)) continue;
+                    if (tw == null)
+                    {
+                        tw = new TcWrite { hm = hm, tc = hm.GetAndCreateTerrainCompiler() };
+                        if (tw.tc == null) throw new InvalidOperationException($"heightmap@({hp.x:F0},{hp.z:F0}) 拿不到 TerrainComp");
+                        L = (float[])FiLevel.GetValue(tw.tc);
+                        Sd = (float[])FiSmooth.GetValue(tw.tc);
+                    }
+                    int idx = i * (w + 1) + j;                 // 行主序 z*(w+1)+x：#19 实测往返自检确认过
+                    float cur = hp.y + heights[idx];
+                    if (!plan.before.ContainsKey(k)) plan.before[k] = cur;
+                    float nl = L[idx] + Sd[idx] + op.w * (op.a - cur);   // 原版 LevelTerrain 同式：smoothDelta 并入后清零
+                    if (Mathf.Abs(nl) > limit)
+                    {
+                        if (op.w >= 0.999f) { if (plan.over++ < 5) plan.overSample += $"({KX(k)},{KZ(k)}) 需 {nl:+0.0;-0.0}m "; }
+                        else plan.clampedSoft++;
+                        nl = Mathf.Clamp(nl, -limit, limit);
+                    }
+                    tw.idx.Add(idx);
+                    tw.lvl.Add(nl);
+                }
+                if (tw == null) continue;
+                if (plan.paint.Count > 0)
+                {
+                    var P = (Color[])FiPaint.GetValue(tw.tc);
+                    int pw = Mathf.RoundToInt(Mathf.Sqrt(P.Length));
+                    for (int y = 0; y < pw; y++)
+                    for (int x = 0; x < pw; x++)
+                    {
+                        Vector3 c = hm.VertexMaskToWorld(x, y);
+                        if (!plan.paint.TryGetValue(VKey(Mathf.FloorToInt(c.x), Mathf.FloorToInt(c.z)), out string pn)) continue;
+                        if (!TryPaintColor(pn, out Color col)) continue;
+                        int pi = y * pw + x;
+                        col.a = P[pi].a;                        // PlanBuild：alpha 通道保留原值
+                        tw.pidx.Add(pi);
+                        tw.pcol.Add(col);
+                    }
+                }
+                writes.Add(tw);
+            }
+            return writes;
+        }
+
+        // 提交：PlanBuild TerrainTools.Save 原样 —— ClaimOwnership → 改数组 → m_operations++ → Save(false) → Poke(0,false)
+        private void CommitWrites(List<TcWrite> writes)
+        {
+            foreach (var tw in writes)
+            {
+                tw.tc.GetComponent<ZNetView>()?.ClaimOwnership();       // 非 owner 时 Save 静默不存盘（重载后 delta 丢失的根因）
+                var L = (float[])FiLevel.GetValue(tw.tc);
+                var Sd = (float[])FiSmooth.GetValue(tw.tc);
+                var M = (bool[])FiModH.GetValue(tw.tc);
+                for (int n = 0; n < tw.idx.Count; n++) { int i = tw.idx[n]; L[i] = tw.lvl[n]; Sd[i] = 0f; M[i] = true; }
+                if (tw.pidx.Count > 0)
+                {
+                    var P = (Color[])FiPaint.GetValue(tw.tc);
+                    var MP = (bool[])FiModP.GetValue(tw.tc);
+                    for (int n = 0; n < tw.pidx.Count; n++) { P[tw.pidx[n]] = tw.pcol[n]; MP[tw.pidx[n]] = true; }
+                }
+                FiOps.SetValue(tw.tc, (int)FiOps.GetValue(tw.tc) + 1);
+                FiLastPt.SetValue(tw.tc, Vector3.zero);                 // 这两个只用来清草，PlanBuild 同样置零
+                FiLastR.SetValue(tw.tc, 0f);
+                MiSave.Invoke(tw.tc, new object[] { false });
+                tw.hm.Poke(0, false);
+            }
+        }
+
+        private static IEnumerator WaitRegen(List<Heightmap> hms)
+        {
+            for (int f = 0; f < 3; f++) yield return null;
+            float t0 = Time.time;
+            while (Time.time - t0 < 5f)
+            {
+                var list = hms ?? Heightmap.GetAllHeightmaps();
+                if (!list.Any(h => h != null && h.HaveQueuedRebuild())) yield break;
+                yield return null;
+            }
+            Log.LogWarning("[地形] ⚠ 等 heightmap 重算超时 5s，按现状继续");
+        }
+
+        private static bool TryPaintColor(string n, out Color c)
+        {
+            switch (n.Trim().ToLowerInvariant())
+            {
+                case "dirt": c = Heightmap.m_paintMaskDirt; return true;
+                case "paved": c = Heightmap.m_paintMaskPaved; return true;
+                case "cultivate": case "cultivated": c = Heightmap.m_paintMaskCultivated; return true;
+                case "reset": c = Heightmap.m_paintMaskNothing; return true;
+                default: c = default(Color); return false;
+            }
+        }
+
+        // 原版地形件：ZNetScene 注册表没有的（非联网 prefab）去锄头/耕地机等工具的 PieceTable 里找
+        private static Dictionary<int, GameObject> s_opPrefabs;
+        private static GameObject TerrainOpPrefab(int hash, string name)
+        {
+            if (s_opPrefabs == null)
+            {
+                s_opPrefabs = new Dictionary<int, GameObject>();
+                if (ObjectDB.instance != null)
+                    foreach (var item in ObjectDB.instance.m_items)
+                    {
+                        var drop = item ? item.GetComponent<ItemDrop>() : null;
+                        var pt = drop ? drop.m_itemData?.m_shared?.m_buildPieces : null;
+                        if (pt == null) continue;
+                        foreach (var go in pt.m_pieces)
+                            if (go && go.GetComponent<TerrainOp>()) s_opPrefabs[go.name.GetStableHashCode()] = go;
+                    }
+                Log.LogInfo($"[地形] 原版地形件 prefab {s_opPrefabs.Count} 个：{string.Join(", ", s_opPrefabs.Values.Select(g => g.name).OrderBy(n => n))}");
+            }
+            if (s_opPrefabs.TryGetValue(hash, out var hit)) return hit;
+            // 旧名 → 现行 _v2（BuildShare 老蓝图记的是 mud_road / path / paved_road / raise）
+            if (name != null && !name.EndsWith("_v2") && s_opPrefabs.TryGetValue((name + "_v2").GetStableHashCode(), out hit)) return hit;
+            var zp = ZNetScene.instance ? ZNetScene.instance.GetPrefab(hash) : null;
+            return zp && zp.GetComponent<TerrainOp>() ? zp : null;
+        }
+
+        // = 原版 TerrainComp.RPC_ApplyOperation 里 owner 做的那一步（TerrainOp.Awake → ApplyOperation → RPC → DoOperation）
+        private bool ApplyVanillaTerrainOp(TerrainOpPiece t, TerrainPlan plan)
+        {
+            var op = t.prefab.GetComponent<TerrainOp>();
+            if (op == null || MiDoOp == null) return false;
+            float r = op.m_settings.GetRadius();
+            if (Dist2D(t.pos, CfgProtectX.Value, CfgProtectZ.Value) < CfgProtectR.Value + r) return false;   // 保护圈一点不碰
+            var hms = new List<Heightmap>();
+            Heightmap.FindHeightmap(t.pos, r + 1f, hms);
+            foreach (var hm in hms)
+            {
+                if (hm == null || hm.IsDistantLod) continue;
+                var tc = hm.GetAndCreateTerrainCompiler();
+                if (tc == null) continue;
+                tc.GetComponent<ZNetView>()?.ClaimOwnership();
+                MiDoOp.Invoke(tc, new object[] { t.pos, t.rot.eulerAngles, op.m_settings });
+            }
+            int R = Mathf.CeilToInt(r) + 1, px = Mathf.RoundToInt(t.pos.x), pz = Mathf.RoundToInt(t.pos.z);
+            for (int dx = -R; dx <= R; dx++)
+            for (int dz = -R; dz <= R; dz++)
+                plan.vanillaTouched.Add(VKey(px + dx, pz + dz));      // 这些顶点归原版操作管，不计入验收误差
             return true;
+        }
+
+        // 逐顶点 dump（首行 # 元数据）→ tools/bp_terrain_report.py 出坡度 / 误差 / 保护圈报告
+        private Dictionary<long, float> WriteTerrainDump(TerrainPlan plan, bool withAfter)
+        {
+            var after = new Dictionary<long, float>();
+            var sb = new System.Text.StringBuilder();
+            sb.Append("# ").Append(string.Join(",", new[] {
+                "PlatformY=" + F3(s_platformY), "PadY=" + F3(plan.padY), "OriginX=" + F3(CfgOriginX.Value), "OriginZ=" + F3(CfgOriginZ.Value),
+                "ProtectX=" + F3(CfgProtectX.Value), "ProtectZ=" + F3(CfgProtectZ.Value), "ProtectR=" + F3(CfgProtectR.Value),
+                "Skirt=" + F3(plan.skirt), "Embed=" + F3(CfgEmbed.Value), "Cap=" + F3(CfgCap.Value) })).Append('\n');
+            sb.Append(withAfter ? "x,z,role,w,target,before,bottom,after\n" : "x,z,role,w,target,before,bottom\n");
+            foreach (var kv in plan.ops)
+            {
+                int x = KX(kv.Key), z = KZ(kv.Key);
+                // V = 原版地形件（作者的锄头整地/路面）后来又改过的顶点：最终形状归作者，不按本工具的目标验收
+                char role = plan.vanillaTouched.Contains(kv.Key) ? 'V' : plan.role[kv.Key];
+                sb.Append(x).Append(',').Append(z).Append(',').Append(role).Append(',')
+                  .Append(F3(kv.Value.w)).Append(',').Append(F3(kv.Value.a)).Append(',')
+                  .Append(plan.before.TryGetValue(kv.Key, out float b) ? F3(b) : "").Append(',')
+                  .Append(plan.minBottom.TryGetValue(kv.Key, out float mb) ? F3(mb) : "");
+                if (withAfter)
+                {
+                    sb.Append(',');
+                    if (Heightmap.GetHeight(new Vector3(x, 0f, z), out float h)) { after[kv.Key] = h; sb.Append(F3(h)); }
+                }
+                sb.Append('\n');
+            }
+            foreach (var k in plan.protect)
+            {
+                if (plan.ops.ContainsKey(k)) continue;
+                int x = KX(k), z = KZ(k);
+                string b0 = plan.before.TryGetValue(k, out float bb) ? F3(bb) : "";
+                sb.Append(x).Append(',').Append(z).Append(",X,0.000,").Append(b0).Append(',').Append(b0).Append(',');
+                if (withAfter)
+                {
+                    sb.Append(',');
+                    if (Heightmap.GetHeight(new Vector3(x, 0f, z), out float h)) sb.Append(F3(h));
+                }
+                sb.Append('\n');
+            }
+            File.WriteAllText(Path.Combine(Paths.ConfigPath, CfgTerrainDump.Value), sb.ToString());
+            return after;
+        }
+        private static string F3(float v) => v.ToString("F3", CultureInfo.InvariantCulture);
+
+        // 跨 run 的运行时状态（key=value）：PlatformY 必须沿用首测值（对账补建 / 重载复核 / 离线对账都要它）
+        private static string RuntimePath => Path.Combine(Paths.ConfigPath, "bp_runtime.txt");
+        private static string ReadRuntime(string key)
+        {
+            if (!File.Exists(RuntimePath)) return null;
+            foreach (var l in File.ReadAllLines(RuntimePath))
+            {
+                int i = l.IndexOf('=');
+                if (i > 0 && l.Substring(0, i).Trim() == key) return l.Substring(i + 1).Trim();
+            }
+            return null;
+        }
+        private static void WriteRuntime(string key, float v)
+        {
+            var kv = new Dictionary<string, string>();
+            if (File.Exists(RuntimePath))
+                foreach (var l in File.ReadAllLines(RuntimePath))
+                {
+                    int i = l.IndexOf('=');
+                    if (i > 0) kv[l.Substring(0, i).Trim()] = l.Substring(i + 1).Trim();
+                }
+            kv[key] = v.ToString("F3", CultureInfo.InvariantCulture);
+            File.WriteAllLines(RuntimePath, kv.Select(p => p.Key + "=" + p.Value));
         }
 
         private float PickShiftByMustDie(List<WearNTear> our)   // ◐DOC §8.3/§9.3: 扫档选必死最少、并列取更深

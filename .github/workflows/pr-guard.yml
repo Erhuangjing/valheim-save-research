@@ -6,7 +6,7 @@ name: PR Guard
 #   表现为 diff 里混入不属于本次改动的文件、或把 main 上已有的内容当不存在。
 #   基错很难在 review 时肉眼发现，所以这里做成自动化检查。
 #
-# 另外顺手当质量门禁：四个工具都自带 --selftest，改动破坏工具时会在这里暴露。
+# 另外顺手当质量门禁：五个工具都自带 --selftest，改动破坏工具时会在这里暴露。
 
 on:
   pull_request:
@@ -80,7 +80,7 @@ jobs:
           fi
 
   selftest:
-    name: 四工具 selftest
+    name: 工具 selftest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,3 +100,6 @@ jobs:
 
       - name: bp_pipeline
         run: python tools/bp_pipeline.py --selftest
+
+      - name: bp_terrain_report
+        run: python tools/bp_terrain_report.py --selftest

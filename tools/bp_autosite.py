@@ -74,7 +74,7 @@ def _pct(sorted_ys, q):
 
 
 def find_sites(records, tile_w=64.0, tile_d=64.0, water_level=WATER_LEVEL,
-               min_samples=8, max_spread=2.0, top=10, max_burial=1.0):
+               min_samples=8, max_spread=2.0, top=10, max_burial=1.0, near=None, protect=None):
     """records = [(hash, x, y, z)]（bp_reconcile.full_scan 输出）。
 
     返回 (sites, reject_counts)：
@@ -86,6 +86,9 @@ def find_sites(records, tile_w=64.0, tile_d=64.0, water_level=WATER_LEVEL,
     埋深（issue #15）：样本 p95 高出平台面多少 = 落点地表会「埋」进建筑基线多深。
     实测掉件率随埋深单调恶化（>0m≈0.2% / 0~1m≈1.5% / 1~2m≈1% / 2~4m≈5% / >4m 6.6~23.5%），
     默认阈值 1.0m。burial 用 p95 抗单块岩石噪声，同时报告 max。
+
+    near    = (x, z, r)：只在用户给的大致方位 r 米内找（skill 的「在我主宅东边建」）
+    protect = (x, z, r)：格子（含外扩）与保护圈（主宅 + 护城河）相交即拒 → rejects['protect']
     """
     samples = []            # (x, y, z, kind)
     builds = []             # (x, z)
@@ -117,13 +120,31 @@ def find_sites(records, tile_w=64.0, tile_d=64.0, water_level=WATER_LEVEL,
                 yield bx, bz
 
     sites, rejects = [], defaultdict(int)
-    cx = min(xs) + hw
-    while cx <= max(xs) - hw + 1e-9:
-        cz = min(zs) + hd
-        while cz <= max(zs) - hd + 1e-9:
+    lo_x, hi_x, lo_z, hi_z = min(xs) + hw, max(xs) - hw, min(zs) + hd, max(zs) - hd
+    if near:
+        nx_, nz_, nr_ = near
+        lo_x, hi_x = max(lo_x, nx_ - nr_), min(hi_x, nx_ + nr_)
+        lo_z, hi_z = max(lo_z, nz_ - nr_), min(hi_z, nz_ + nr_)
+        step = min(step, max(4.0, nr_ / 4.0))                 # 小范围搜索步子也要小，否则一格都落不进来
+
+    def hits_protect(cx, cz):
+        if not protect or protect[2] <= 0:
+            return False
+        px, pz, pr = protect                                   # 矩形 vs 圆：最近点距离 < r
+        qx, qz = min(max(px, cx - hw), cx + hw), min(max(pz, cz - hd), cz + hd)
+        return (qx - px) ** 2 + (qz - pz) ** 2 < pr * pr
+
+    cx = lo_x
+    while cx <= hi_x + 1e-9:
+        cz = lo_z
+        while cz <= hi_z + 1e-9:
             ss = [s for bx, bz in bins_for(cx, cz) for s in sbin.get((bx, bz), [])]
             nb = sum(len(bbin.get((bx, bz), [])) for bx, bz in bins_for(cx, cz))
-            if nb > 0:
+            if near and (cx - near[0]) ** 2 + (cz - near[1]) ** 2 > near[2] ** 2:
+                rejects['far'] += 1
+            elif hits_protect(cx, cz):
+                rejects['protect'] += 1
+            elif nb > 0:
                 rejects['built'] += 1
             elif len(ss) < min_samples:
                 rejects['sparse'] += 1
@@ -152,6 +173,7 @@ def find_sites(records, tile_w=64.0, tile_d=64.0, water_level=WATER_LEVEL,
                         'rocks': sum(1 for s in ss if s[3] == 'rock'),
                         'pickables': sum(1 for s in ss if s[3] == 'pickable'),
                         'buildings': nb,
+                        'dist': round(((cx - near[0]) ** 2 + (cz - near[1]) ** 2) ** 0.5, 1) if near else None,
                     })
             cz += step
         cx += step
@@ -225,8 +247,17 @@ def selftest():
         and bool(sites) and 'burial_p95' in sites[0]
     print('F 埋深否决     : burial 拒绝=%d 合格区无台地混入 → %s'
           % (rej.get('burial', 0), 'PASS' if okF else 'FAIL'))
-    ok = okA and okB and okC and okF
-    print('selftest:', '四案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
+    # G：指定大致方位（A 区附近）+ 保护圈压住 A 区西半 → 只剩东半、且都在搜索半径内
+    sg, rg = find_sites(recs, tile_w=24, tile_d=24, near=(132, 132, 40), protect=(108, 132, 14))
+    def clear_of_protect(s, px=108, pz=132, pr=14, h=12):
+        qx, qz = min(max(px, s['site_x'] - h), s['site_x'] + h), min(max(pz, s['site_z'] - h), s['site_z'] + h)
+        return (qx - px) ** 2 + (qz - pz) ** 2 >= pr * pr
+    okG = bool(sg) and all(s['dist'] <= 40 for s in sg) and rg.get('protect', 0) > 0 \
+        and all(clear_of_protect(s) for s in sg)
+    print('G 方位+保护圈  : %d 个候选全在 40m 内、protect 拒绝=%d → %s'
+          % (len(sg), rg.get('protect', 0), 'PASS' if okG else 'FAIL'))
+    ok = okA and okB and okC and okF and okG
+    print('selftest:', '五案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
     return 0 if ok else 1
 
 
@@ -241,6 +272,12 @@ def main(argv=None):
     ap.add_argument('--max-burial', type=float, default=1.0,
                     help='埋深阈值（米，默认 1.0；实测 >1m 掉件率开始上行：1~2m≈1%%、2~4m≈5%%、>4m 6.6~23.5%%）')
     ap.add_argument('--water-level', type=float, default=WATER_LEVEL)
+    ap.add_argument('--near-x', type=float, help='只在这附近找（用户给的大致方位）')
+    ap.add_argument('--near-z', type=float)
+    ap.add_argument('--near-r', type=float, default=80.0, help='搜索半径（米，默认 80）')
+    ap.add_argument('--protect-x', type=float, help='保护圈（主宅 + 护城河）：格子相交即拒')
+    ap.add_argument('--protect-z', type=float)
+    ap.add_argument('--protect-r', type=float, default=0.0)
     ap.add_argument('--top', type=int, default=10)
     ap.add_argument('--json', help='结果 JSON 输出路径')
     ap.add_argument('--selftest', action='store_true')
@@ -263,9 +300,12 @@ def main(argv=None):
 
     hslib = _init_name_cache()
     records = bp_reconcile.full_scan(a.world, hslib)
+    near = (a.near_x, a.near_z, a.near_r) if a.near_x is not None and a.near_z is not None else None
+    protect = (a.protect_x, a.protect_z, a.protect_r) if a.protect_x is not None and a.protect_z is not None else None
     sites, rej = find_sites(records, tile_w=tile_w, tile_d=tile_d,
                             water_level=a.water_level, min_samples=a.min_samples,
-                            max_spread=a.max_spread, top=a.top, max_burial=a.max_burial)
+                            max_spread=a.max_spread, top=a.top, max_burial=a.max_burial,
+                            near=near, protect=protect)
     print('扫描记录 %d 条 | 格子 %.0f×%.0f m | 判据: 起伏≤%.1fm 埋深≤%.1fm 水位线 %.0f 样本≥%d'
           % (len(records), tile_w, tile_d, a.max_spread, a.max_burial, a.water_level, a.min_samples))
     print('拒绝统计: %s' % (rej or '（无）'))

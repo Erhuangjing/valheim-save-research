@@ -50,6 +50,18 @@ HASHLIB_PATH = os.path.join(REPO, 'format', 'prefab-hashlib.json')
 DEEP_PY = -1.2
 STRUCT_CATS = ('Building',)
 
+# 原版地形操作件（锄头/耕地机/镐的 TerrainOp prefab，hashlib + 本地化键 piece_levelground 等核对）。
+# 它们不是建筑：执行一次就自毁、不留 ZDO。执行器按原版 TerrainOp 回放，离线对账不应期望它们存在。
+# vbuild 蓝图没有 #Terrain 段，作者的锄头整地就以这些件的形式记在件清单里（longhouse：327 个 mud_road）
+TERRAIN_OP_PIECES = frozenset({
+    'mud_road', 'mud_road_v2',          # 整平地面（Level ground）
+    'path', 'path_v2',                  # 小路
+    'paved_road', 'paved_road_v2',      # 铺石路
+    'raise', 'raise_v2',                # 抬高地面
+    'cultivate', 'cultivate_v2', 'replant',
+    'digg', 'digg_v2', 'digg_v3',
+})
+
 
 # ---------------------------------------------------------------- StableHash
 def stable_hash(s):
@@ -306,12 +318,18 @@ def load_any(path):
 
 # ---------------------------------------------------------------- 预检分析
 def ground_layer_py(pieces):
-    """自动推导地面层 py。返回 (py, 方法说明)。收官报告 §9.1 算法移植。"""
+    """自动推导地面层 py。返回 (py, 方法说明)。收官报告 §9.1 算法移植 + 地形件优先。"""
     fences = [p['y'] for p in pieces if p['name'] == 'wood_fence']
     if len(fences) >= 4:
         cnt = collections.Counter(round(y, 2) for y in fences)
         py, n = cnt.most_common(1)[0]
         return py, 'wood_fence 众数（%d 段院墙，%d 段同高）' % (len(fences), n)
+    # 原版锄头件（mud_road 整地 / paved_road …）的 y 就是作者当时整出来的地表——比直方图可靠：
+    # longhouse 的直方图会挑中打进地里 6~7m 的深桩（-6.83），照它落地主楼层会悬空 6m
+    ops = sorted(p['y'] for p in pieces if p['name'] in TERRAIN_OP_PIECES)
+    if len(ops) >= 10:
+        return round(ops[len(ops) // 2], 2), '原版地形件中位数（%d 个锄头整地/路面件 = 作者当时的地表）' % len(ops)
+    pieces = [p for p in pieces if p['name'] not in TERRAIN_OP_PIECES]
     bins = collections.defaultdict(list)
     for p in pieces:
         bins[math.floor(p['y'] / 0.5)].append(p['y'])
@@ -462,6 +480,13 @@ def selftest():
     check('孤立低层被跳过 → -1.60（不是 -2.6 / -1.10）', abs(gpy + 1.60) < 1e-6)
     gpy2, _ = ground_layer_py(bp['pieces'])
     check('wood_fence 众数路径 → -0.7', abs(gpy2 + 0.7) < 1e-6)
+    # longhouse 型：几根深桩在 -6.8（直方图会误选），12 个 mud_road 在 -0.6 → 应取 -0.6
+    lh = ([dict(fake[0], name='wood_pole2', y=-6.83 + i * 0.01) for i in range(3)]
+          + [dict(fake[0], name='wood_beam', y=-6.8)]
+          + [dict(fake[0], name='wood_floor', y=-0.4) for _ in range(20)]
+          + [dict(fake[0], name='mud_road', y=-0.6 + (i % 3) * 0.02) for i in range(12)])
+    gpy3, how3 = ground_layer_py(lh)
+    check('原版地形件路径 → -0.6（不被深桩带偏）', abs(gpy3 + 0.58) < 0.03 and '地形件' in how3)
 
     print('== .vbuild fixture ==')
     vb = parse_vbuild_lines(SELFTEST_VBUILD.splitlines())

@@ -56,21 +56,21 @@
 ### 2.1 关键路径
 | 用途 | 路径 |
 |---|---|
-| 专用服务器根目录 | `D:\SteamLibrary\steamapps\common\Valheim dedicated server` |
+| 专用服务器根目录 | `<VALHEIM_SERVER_DIR>` |
 | 世界存档 | `<服务器>\save\worlds_local\WORLD\` |
-| 游戏本体(取 resources.assets 用) | `D:\SteamLibrary\steamapps\common\Valheim` |
+| 游戏本体(取 resources.assets 用) | `<VALHEIM_DIR>` |
 | 游戏程序集(API 扫描用) | `<服务器>\valheim_server_Data\Managed\assembly_valheim.dll` |
-| **插件源码** | `E:\wkbdfile\2026-08-17-16-03-22\bpbuild\Plugin.cs` |
-| 插件工程文件 | `E:\wkbdfile\2026-08-17-16-03-22\bpbuild\XiBpBuilder.csproj` |
+| **插件源码** | `<WORK>/bpbuild/Plugin.cs` |
+| 插件工程文件 | `<WORK>/bpbuild/XiBpBuilder.csproj` |
 | 编译产物 | `<工程>\bin\Release\XiBpBuilder.dll` |
 | **插件部署位置** | `<服务器>\BepInEx\plugins\XiBpBuilder.dll` |
 | **插件配置** | `<服务器>\BepInEx\config\com.world.bpbuild.cfg` |
 | **运行日志** | `<服务器>\BepInEx\config\bpbuild.log` |
 | 件清单(蓝图转换结果) | `<服务器>\BepInEx\config\bp_pieces.txt` |
 | 阶段标记文件 | `<服务器>\BepInEx\config\{bp_done,cleanup_done,terrain_done}.flag` |
-| 参考/分析脚本 | `E:\wkbdfile\2026-08-17-16-03-22\ref\` |
-| 蓝图原文件 | `E:\wkbdfile\2026-08-17-16-03-22\Nelesstarterbase_只要结构.blueprint` |
-| 备份 | `E:\wkbdfile\2026-08-17-16-03-22\Valheim_WORLD_backup_before_20260915_v18\` |
+| 参考/分析脚本 | `tools/` |
+| 蓝图原文件 | `<BLUEPRINT>` |
+| 备份 | `<BACKUP_DIR>\` |
 | 技能文档(深度参考) | `C:\Users\<USER>\.workbuddy\skills\valheim-dedicated-server\SKILL.md` |
 
 ### 2.2 工具链与环境限制
@@ -82,12 +82,12 @@
 ### 2.3 编译与部署(照抄即可)
 ```bash
 # 编译
-cd "E:/wkbdfile/2026-08-17-16-03-22/bpbuild"
+cd "<WORK>/bpbuild"
 "/c/Program Files/dotnet/dotnet" build XiBpBuilder.csproj -c Release -v q --nologo
 
 # 部署(先确认服务器已停)
-cp "E:/wkbdfile/2026-08-17-16-03-22/bpbuild/bin/Release/XiBpBuilder.dll" \
-   "D:/SteamLibrary/steamapps/common/Valheim dedicated server/BepInEx/plugins/XiBpBuilder.dll"
+cp "<WORK>/bpbuild/bin/Release/XiBpBuilder.dll" \
+   "<VALHEIM_SERVER_DIR>/BepInEx/plugins/XiBpBuilder.dll"
 ```
 
 ---
@@ -479,7 +479,7 @@ cp "<服务器>/BepInEx/plugins/XiBpBuilder.dll.v17" "<服务器>/BepInEx/plugin
 
 # B. 回滚整个世界(会丢掉 v0.18 的所有改动)
 rm -rf "<服务器>/save/worlds_local/WORLD"
-cp -r "E:/wkbdfile/2026-08-17-16-03-22/Valheim_WORLD_backup_before_20260915_v18/WORLD" \
+cp -r "<BACKUP_DIR>/WORLD" \
       "<服务器>/save/worlds_local/"
 ```
 
@@ -506,9 +506,9 @@ cp -r "E:/wkbdfile/2026-08-17-16-03-22/Valheim_WORLD_backup_before_20260915_v18/
 
 **`apiscan` 用法**(找游戏内部 API 时非常有用):
 ```bash
-cd "E:/wkbdfile/2026-08-17-16-03-22/ref/apiscan"
+cd "tools/apiscan"
 "/c/Program Files/dotnet/dotnet" run --project apiscan.csproj -c Release -- \
-  "D:\SteamLibrary\steamapps\common\Valheim dedicated server\valheim_server_Data\Managed\assembly_valheim.dll" \
+  "<VALHEIM_SERVER_DIR>\valheim_server_Data\Managed\assembly_valheim.dll" \
   "WearNTear" "support|placed|health"
 ```
 
@@ -629,7 +629,7 @@ foreach (System.Collections.DictionaryEntry e in dict) {
 - 会主动检查"有没有落盘敏感信息"(服务器密码等只能通过内存通道使用,禁止写盘)
 
 **做完事要做的两件事**
-1. 往 `E:\wkbdfile\2026-08-17-16-03-22\.workbuddy\memory\YYYY-MM-DD.md` 追加工作记录
+1. 往 `.workbuddy/memory/YYYY-MM-DD.md` 追加工作记录
 2. 如果发现可复用的新方法,更新 `valheim-dedicated-server` 技能文档
 
 ---

@@ -144,12 +144,12 @@ Beech1 树 (39B)             : [pos][hash][?][…][04 11]
 
 ## 六、测试基础设施（保留）
 
-- 可用副本：`E:\wkbdfile\2026-08-17-16-03-22\testsave\worlds_local\WORLD_CTRL`（0 异常）
+- 可用副本：`<TEST_SAVE_DIR>\worlds_local\WORLD_CTRL`（0 异常）
 - 测试服启动模板：
   ```
   SteamAppId=892970 ./valheim_server.exe -nographics -batchmode -name "t" -port 24XX \
       -world "WORLD_CTRL" -password <REDACTED_PASSWORD> \
-      -savedir "E:\wkbdfile\2026-08-17-16-03-22\testsave" -public 0
+      -savedir "<TEST_SAVE_DIR>" -public 0
   ```
 - 全部实验日志：`Valheim_WORLD_backup_20260912\test_logs\`
 

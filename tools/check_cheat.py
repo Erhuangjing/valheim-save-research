@@ -2,6 +2,31 @@
 """检查角色存档 + 世界 db2 里的作弊标记"""
 import os, re, gzip, io, struct
 
+
+# ── issue #6：路径解析 ──────────────────────────────────────────────
+# 仓库内资源自动定位；外部路径走环境变量（缺省时报错清晰，不再硬编码本机路径）
+#   VH_WORLD_ROOT  worlds_local 根目录
+#   VH_WORLD       单个世界目录（含 .chunk / .chunks）
+#   VH_SERVER      Valheim dedicated server 安装目录
+#   VH_BACKUP      备份输入/输出根目录
+HERE = os.path.dirname(os.path.abspath(__file__))          # tools/
+ROOT = os.path.dirname(HERE)                               # 仓库根
+HASHLIB = os.path.join(ROOT, 'format', 'prefab-hashlib.json')
+WORLD_ROOT = os.environ.get('VH_WORLD_ROOT')
+WORLD_DIR = os.environ.get('VH_WORLD')
+SERVER_DIR = os.environ.get('VH_SERVER')
+BACKUP_DIR = os.environ.get('VH_BACKUP')
+
+
+def need(var, val, hint):
+    """外部路径缺省时给清晰报错，而不是抛莫名的 FileNotFoundError"""
+    if not val:
+        raise SystemExit(
+            '✗ 需要设置环境变量 %s（%s）\n'
+            '  例：export %s="<你的路径>"'
+            % (var, hint, var))
+    return val
+# ────────────────────────────────────────────────────────────────────
 def strings(data, minlen=4):
     return sorted(set(m.group().decode('ascii', 'replace')
                       for m in re.finditer(rb'[\x20-\x7e]{%d,60}' % minlen, data)))
@@ -28,7 +53,7 @@ else:
 print()
 print('=' * 70)
 print('2) 世界 db2（16 字节头 + gzip）')
-D = r'D:/SteamLibrary/steamapps/common/Valheim dedicated server/save/worlds_local/WORLD'
+D = need('VH_WORLD', WORLD_DIR, '世界存档目录（含 .chunk）')
 db2 = sorted(f for f in os.listdir(D) if f.endswith('.db2'))[-1]
 p = os.path.join(D, db2)
 raw = open(p, 'rb').read()

@@ -1,8 +1,8 @@
 # 地形 delta 存档侧核查报告（离线二进制考古）
 
 日期：2026-09-16 23:5x
-对象：正式服 `WORLD` 世界（`D:\SteamLibrary\steamapps\common\Valheim dedicated server\save\worlds_local\`）
-备份：`E:\wkbdfile\2026-08-17-16-03-22\ref\saves\WORLD_2026-09-16_2340_user_logout\`（18 文件 / 3.8MB）
+对象：正式服 `WORLD` 世界（`<VALHEIM_SERVER_DIR>\save\worlds_local\`）
+备份：`<BACKUP_DIR>\WORLD_2026-09-16_2340_user_logout\`（18 文件 / 3.8MB）
 
 ---
 

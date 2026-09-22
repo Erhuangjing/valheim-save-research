@@ -4,8 +4,33 @@
 """
 import os, re, shutil, struct, time, subprocess
 
+
+# ── issue #6：路径解析 ──────────────────────────────────────────────
+# 仓库内资源自动定位；外部路径走环境变量（缺省时报错清晰，不再硬编码本机路径）
+#   VH_WORLD_ROOT  worlds_local 根目录
+#   VH_WORLD       单个世界目录（含 .chunk / .chunks）
+#   VH_SERVER      Valheim dedicated server 安装目录
+#   VH_BACKUP      备份输入/输出根目录
+HERE = os.path.dirname(os.path.abspath(__file__))          # tools/
+ROOT = os.path.dirname(HERE)                               # 仓库根
+HASHLIB = os.path.join(ROOT, 'format', 'prefab-hashlib.json')
+WORLD_ROOT = os.environ.get('VH_WORLD_ROOT')
+WORLD_DIR = os.environ.get('VH_WORLD')
+SERVER_DIR = os.environ.get('VH_SERVER')
+BACKUP_DIR = os.environ.get('VH_BACKUP')
+
+
+def need(var, val, hint):
+    """外部路径缺省时给清晰报错，而不是抛莫名的 FileNotFoundError"""
+    if not val:
+        raise SystemExit(
+            '✗ 需要设置环境变量 %s（%s）\n'
+            '  例：export %s="<你的路径>"'
+            % (var, hint, var))
+    return val
+# ────────────────────────────────────────────────────────────────────
 FCH = r'C:/Program Files (x86)/Steam/userdata/<STEAM3ID>/892970/remote/characters/<PLAYER1>.fch'
-BKROOT = r'E:/wkbdfile/2026-08-17-16-03-22/ref/_char_backup'
+BKROOT = BACKUP_DIR
 PAT = b'\x0bdevcommands\x00\x00\xa0\x40'      # len=11 + "devcommands" + float 5.0
 PAT_SHORT = b'\x0bdevcommands'
 ENTRY_LEN = 16

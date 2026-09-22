@@ -1,12 +1,37 @@
 # -*- coding: utf-8 -*-
 """正式落地：把蓝图写进正式世界（动态算插入点 + 备份 + 验证）"""
 import os, sys, time, shutil, struct, collections
-sys.path.insert(0, r'E:/wkbdfile/2026-08-17-16-03-22/ref')
+sys.path.insert(0, HERE)
 from zdo_lib import hs, candidates, patch_counts, insert_bytes
 
-SRC = r'D:/SteamLibrary/steamapps/common/Valheim dedicated server/save/worlds_local/WORLD'
-BKROOT = r'E:/wkbdfile/2026-08-17-16-03-22/Valheim_WORLD_backup_20260912'
-BP = r'E:/wkbdfile/2026-08-17-16-03-22/ref/bep/BepInExPack_Valheim/BepInEx/config/bp_pieces.txt'
+
+# ── issue #6：路径解析 ──────────────────────────────────────────────
+# 仓库内资源自动定位；外部路径走环境变量（缺省时报错清晰，不再硬编码本机路径）
+#   VH_WORLD_ROOT  worlds_local 根目录
+#   VH_WORLD       单个世界目录（含 .chunk / .chunks）
+#   VH_SERVER      Valheim dedicated server 安装目录
+#   VH_BACKUP      备份输入/输出根目录
+HERE = os.path.dirname(os.path.abspath(__file__))          # tools/
+ROOT = os.path.dirname(HERE)                               # 仓库根
+HASHLIB = os.path.join(ROOT, 'format', 'prefab-hashlib.json')
+WORLD_ROOT = os.environ.get('VH_WORLD_ROOT')
+WORLD_DIR = os.environ.get('VH_WORLD')
+SERVER_DIR = os.environ.get('VH_SERVER')
+BACKUP_DIR = os.environ.get('VH_BACKUP')
+
+
+def need(var, val, hint):
+    """外部路径缺省时给清晰报错，而不是抛莫名的 FileNotFoundError"""
+    if not val:
+        raise SystemExit(
+            '✗ 需要设置环境变量 %s（%s）\n'
+            '  例：export %s="<你的路径>"'
+            % (var, hint, var))
+    return val
+# ────────────────────────────────────────────────────────────────────
+SRC = need('VH_WORLD', WORLD_DIR, '世界存档目录（含 .chunk）')
+BKROOT = BACKUP_DIR
+BP = os.path.join(ROOT, 'tools', 'bp_pieces.txt')
 OX, OZ = -262.0, 270.0
 H = hs()
 

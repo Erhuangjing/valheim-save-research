@@ -20,7 +20,7 @@
 ## 二、已装了什么（都在服务器目录，**没覆盖任何原有文件**）
 
 ```
-D:\SteamLibrary\steamapps\common\Valheim dedicated server\
+<VALHEIM_SERVER_DIR>\
 ├── winhttp.dll                    ← 新增（BepInEx 入口，DLL 注入方式）
 ├── doorstop_config.ini            ← 新增
 ├── doorstop_libs\                 ← 新增
@@ -95,7 +95,7 @@ OriginZ = 269.5     ← 南北方向
 我已经在你落地前存了一份世界快照：
 
 ```
-E:\wkbdfile\2026-08-17-16-03-22\Valheim_WORLD_backup_20260912\pre_blueprint_20260914-181738\WORLD\
+<BACKUP_DIR>\pre_blueprint_20260914-181738\WORLD\
 ```
 
 不满意的话，**先停服**，然后把 `save\worlds_local\WORLD` 整个替换成这份快照，重启即可完全还原。

@@ -1,15 +1,40 @@
 # -*- coding: utf-8 -*-
 """把蓝图真正落地到副本世界（离线写档版）"""
 import os, sys, shutil, struct, collections, math
-sys.path.insert(0, r'E:/wkbdfile/2026-08-17-16-03-22/ref')
+sys.path.insert(0, HERE)
 from zdo_lib import hs, walk, patch_counts, insert_bytes
 
-SRC = r'D:/SteamLibrary/steamapps/common/Valheim dedicated server/save/worlds_local/WORLD'
-TS = r'E:/wkbdfile/2026-08-17-16-03-22/testsave/worlds_local'
+
+# ── issue #6：路径解析 ──────────────────────────────────────────────
+# 仓库内资源自动定位；外部路径走环境变量（缺省时报错清晰，不再硬编码本机路径）
+#   VH_WORLD_ROOT  worlds_local 根目录
+#   VH_WORLD       单个世界目录（含 .chunk / .chunks）
+#   VH_SERVER      Valheim dedicated server 安装目录
+#   VH_BACKUP      备份输入/输出根目录
+HERE = os.path.dirname(os.path.abspath(__file__))          # tools/
+ROOT = os.path.dirname(HERE)                               # 仓库根
+HASHLIB = os.path.join(ROOT, 'format', 'prefab-hashlib.json')
+WORLD_ROOT = os.environ.get('VH_WORLD_ROOT')
+WORLD_DIR = os.environ.get('VH_WORLD')
+SERVER_DIR = os.environ.get('VH_SERVER')
+BACKUP_DIR = os.environ.get('VH_BACKUP')
+
+
+def need(var, val, hint):
+    """外部路径缺省时给清晰报错，而不是抛莫名的 FileNotFoundError"""
+    if not val:
+        raise SystemExit(
+            '✗ 需要设置环境变量 %s（%s）\n'
+            '  例：export %s="<你的路径>"'
+            % (var, hint, var))
+    return val
+# ────────────────────────────────────────────────────────────────────
+SRC = need('VH_WORLD', WORLD_DIR, '世界存档目录（含 .chunk）')
+TS = need('VH_WORLD_TEST', os.environ.get('VH_WORLD_TEST'), '测试存档根目录')
 CHUNK = '20_1e__1_16.chunk'
 IDX = '_main.21.chunks'
 INSERT_AT = 916096
-BP = r'E:/wkbdfile/2026-08-17-16-03-22/ref/bep/BepInExPack_Valheim/BepInEx/config/bp_pieces.txt'
+BP = os.path.join(ROOT, 'tools', 'bp_pieces.txt')
 DST_NAME = 'XILAND'
 
 H = hs()

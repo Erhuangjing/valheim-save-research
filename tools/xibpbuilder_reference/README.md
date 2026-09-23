@@ -12,9 +12,11 @@
 
 **编译状态**：2026-09-21 实机验证通过（.NET SDK 9.0.313 + Valheim dedicated server 1.0 + BepInEx 5，
 0 警告 0 错误，产物 `bin/Release/XiBpBuilder.dll` 28,672 字节；8 个协程状态机完整——见 PR #1 实测报告）。
-第三轮（#19 Terrain 段 3 处 API 签名 + 重建链调用对象）与 #22（`Poke` 参数 + `TryInvoke` 类型匹配）之后，
-2026-09-22 按同一口径（只替换 `REPLACE_ME`）重新编译：0 警告 0 错误。签名依据见下「Terrain 段：反射实测 API」；
-`Terrain.Enabled=true + Carve=true` 的实机结果见 issue #22。
+2026-09-23 Terrain 段重写为 PlanBuild 式逐点整地（见下节「Terrain 段」）后按同一口径（只替换 `REPLACE_ME`）
+重新编译：0 警告 0 错误，产物 61,952 字节；副本世界测试服三个蓝图实机验收（skeggoxmanor / nelesstarterbase /
+longhouse，数字见 `skills/valheim-blueprint-build/SKILL.md`「实测基准」）。
+同日加承重观测、锄头件采样、承重预演 + 接地修补、安全清理、拆旧、整格地形还原后：0 警告 0 错误，产物 86,016 字节；
+三个蓝图关锁 + 区域激活实测，并在正式服旧址重建一次（数字见 SKILL.md）。
 **运行状态**：隔离环境端到端实测通过（清障→落地→保存，1805/1805 零丢失、prefab 校验失败 0、
 坐标公式反推精确吻合）。已修的运行期问题分三轮：
 第一轮（#7 uint32 hash 溢出 / #8 锚点 NRE 静默 / #9 GUID 致 cfg 不通用）；
@@ -28,33 +30,66 @@ false 掉件 3.7%~15.9%、true ±0）、**#12 锚点位移重构**（全集统�
 
 | 项 | 行为 | 依据 |
 |---|---|---|
-| `Support.Enabled` | **默认 true**。「锚点成功则不需锁」已被 A/B 实测证伪 | #13 |
+| `Support.Enabled` | 默认 true，但**只管插件在的时候**：删掉插件后玩家走近，原版承重照常重算（每次载入区域都从满支撑往下衰减），锁着时的存活率不代表不塌 | #13 |
+| 承重观测 | `[Support] ObserveMinutes`（`bp_pipeline.py observe`）：支撑锁关 + 区域激活（服务器替玩家把工地实例化、跑原版 `UpdateWear/UpdateSupport`），解冻同一帧拍快照，每 `ObserveInterval` 秒记件数 + 锤子同款承重色（`GetSupportColorValue`）；结束列塌件（prefab、材质、蓝图坐标 → `bp_observe_lost.csv`）；观测期本工具件塌掉不掉建材 | 本轮 |
 | 锚点位移对象 | **本 run 创建的全集**（`s_ourZdoIds`），等实例化齐后每轮统一位移，结束后全量 Δy 校验；**对账补建路径跳过锚点**（只重建缺失件，整体位移会撕裂建筑，以 cfg `YOffset` 为准） | #12 |
 | ⚠ PatchAll 坑 | `PatchAll(Type)` 只补那一个类，**不是整个程序集**——新增补丁类必须逐个注册；启动时打印 `GetAllPatchedMethods()` 实际挂载数自检 | #13 附 |
-| Terrain | 空桩已补真实实现（API 见下节；`m_heights` 直写前先做布局往返自检）；取 0 个 heightmap、改 0 个顶点、布局自检失败、重建链缺方法，**四种情况都不写 `terrain_done`** | #14 / #19 |
+| Terrain | **2026-09-23 重写为 PlanBuild 式逐点整地**（下节）：只改占地 + 过渡带；保护圈内一个顶点都不改；任一满权重顶点需改超 ±8m 整段放弃；验收不过不写 `terrain_done` | 本轮 |
+| 落地高度 | `[Build] AutoPlatformY=true`：件放下前在游戏里实测地形，整栋竖直偏移 = 中位数(地形高 − 件 py)；首测值存 `bp_runtime.txt`，对账补建 / 重载复核沿用 | 本轮 |
+| 锚点 | 整过地的建筑**跳过**整体位移。⚠ 旧测量本身不可信：层掩码缺 `terrain`、碰撞体只取根节点（91% 件「无碰撞体」）→ 与地形无关地恒定 −1.05m；不开 Terrain 时仍在用，待修 | 本轮 |
 | 判掉件口径 | 清点 mark ZDO（不用总记录数——会混入掉落物/自然物）；支撑体检输出值域与越界计数（防「反射拿错值」被当真没问题） | #16 |
+| 清理 | **只搬自然物**（`ClearAllInArea` 默认 false；名单见 `NatureKeys`）；`_` 开头的系统 ZDO、`LocationProxy`、玩家、墓碑、容器、任何带 `Piece` 的件**永远不动**。旧实现 `ClearAllInArea=true` 且不看这些：把 zone 中心的 `_TerrainCompiler` 搬到世界角落 → 那一整格的地形修改消失（正式服护城河东段就是这么没的，交界处齐刷刷一道断层） | 本轮 |
+| 拆旧 `[Demolish]` | 落地前销毁圈内带 `MarkKey` 标记的旧件（`ZNetScene.Destroy` / `ZDOMan.DestroyZDO`：不走 `WearNTear.Destroy`，不掉建材）；有东西的箱子不拆、逐个报；圈内玩家自己建的件只报数、不动；保护圈内跳过 | 本轮 |
+| 整格地形还原 `[Terrain] RestoreFile` | 落地前把文件里各 zone 的地形编译器数组整格重写（`tools/bp_terrain_restore.py plan` 离线从旧备份算出），同 CommitWrites 存盘刷新；做不成则整段中止、一件不放 | 本轮 |
+| 观测提前结束 | `[Support] ObserveStableSec`（默认 30）：已观测满 60s 且件数与承重色连续这么多秒不变 → 收工；实测塌件都在前 40s、颜色 70s 内收敛 | 本轮 |
 
-### Terrain 段：反射实测 API（issue #19，改代码前先看这张表）
+### Terrain 段：PlanBuild 式逐点整地（2026-09-23 重写）
 
-成员名/签名来自对 `assembly_valheim.dll` 的**反射枚举**（发 issue 方的 `apipeek`，绕开 `#Strings`
-堆后缀压缩造成的字符串搜索假阴性），不是文档推断。**字符串搜索校验不了这些**（见下「逐一核对反射签名」）。
+**为什么重写**（正式服实测事故链）：旧实现改的是落点 93m 内 7 块 heightmap 的**全部顶点**
+（日志里的「改动 29575 个顶点」= 7 × 65²，约 190m 见方压成同一高度），±8m 截断处成斜坡/断崖、与没改的
+zone 交界成断层；直写 `m_heights` + 自拼 6 步重建链，zone 重载按 delta 重算就对不上；不 `ClaimOwnership`
+时 `TerrainComp.Save` 对非 owner 是静默空操作（09-16 重载后 delta 丢失的根因）；且完全不看保护圈。
 
-| 用途 | 实测签名 | 踩过的坑 |
-|---|---|---|
-| 取附近 heightmap | `static void Heightmap.FindHeightmap(Vector3 point, float radius, List<Heightmap> out)`；全量：`static List<Heightmap> Heightmap.GetAllHeightmaps()` | ❌ `Heightmap.GetAllInstances()` **不存在**——那是 `get_Instances()`（`List<IMonoUpdater>`）。本次两条都用：半径筛 + 筛不到时全量兜底 |
-| 取 TerrainComp | `TerrainComp Heightmap.GetAndCreateTerrainCompiler()`（实例方法，缺失时创建）；`static TerrainComp TerrainComp.FindTerrainCompiler(Vector3 worldPos)`（只返回已存在的） | ❌ `ZoneSystem.GetZone` 是**静态**且返回 `Vector2s`（zone id），`FindTerrainCompiler` 要的是**世界坐标**——原写法既有 CS0176 又有 CS1503 |
-| 高度数组 | `List<float> Heightmap.m_heights`（`(width+1)²` 行主序，`index = z*(width+1)+x`） | ❌ 原写法 `(float[])…` 编译能过、运行必抛 `InvalidCastException` |
-| 重建链 | `TerrainComp.Save(bool)` + **Heightmap** 侧 `ApplyModifiers() / Poke(int delayed, bool paintOnly) / UpdateCornerDepths() / RebuildCollisionMesh() / RebuildRenderMesh()` | ❌ 原写法把 `ApplyModifiers` 调在 TerrainComp 上，而 `m?.Invoke` 会**静默吞掉**「方法不存在」→ 链断一环不报错。现在缺方法记名 + 拒绝写 `terrain_done`。❌ issue #22：`Poke` **带 2 参**；反射取方法必须传**完整**参数类型数组（无参传空数组，不是 `null`——`null` = 任取同名重载，Invoke 时抛 `TargetParameterCountException`） |
-| 同一个高度 | `float Heightmap.GetHeight(int x, int z)`（**参数序 (x,z)**；文档实证：`hmap.GetHeight(j, i)`） | 同名重载可能不止一个 → 反射取方法时显式指定 `(int,int)` |
+**现在的写法**（照搬 PlanBuild `Blueprints/TerrainTools.cs`，sirskunkalot/PlanBuild，WTFPL）：只改 TerrainComp 的
+`m_levelDelta / m_smoothDelta / m_modifiedHeight`（+ `m_paintMask / m_modifiedPaint`），然后
+`ClaimOwnership → m_operations++ → Save(false) → Heightmap.Poke(0,false)`，高度/碰撞/渲染交给游戏自己重算。
+每个顶点的全部操作先在内存里精确复合（`h' = h + w(a − h)` 顺序复合仍是同形），每个 TerrainComp 只写一次；
+跨 zone 边界的共享顶点两侧各写一份 → 不留缝。
 
-**`m_heights` 布局的运行时自检**：`(width+1)² 行主序` 与 `index 算法` 一直是文档推断、从未实证，
-所以 `HeightLayoutVerified()` 在写入前把一个顶点挪 1 米再用游戏自己的 `GetHeight` 回读、再复原，
-两个方向都对上才继续；对不上就报 Error 并放弃本段（不写 `terrain_done`）。
-探测点取 **x≠z**（(1,2)）—— 对称点在「行主序」与「转置」下算出同一个 index，检不出 x/z 转置。
-`DryRun=true` 现在**真的不动地形**（原来照样写 `m_heights`/delta），且跳过重建链。
+**时序**：实测 PlatformY → 放件（磨损冻结、支撑锁定）→ 等实例化 → 量本工具件的**真实碰撞体**（整棵子树）
+→ 生成方案 → 预演（保护圈 / ±8m 检查，不过则一个顶点都不写）→ 提交 → 等重算 → **承重预演 → 接地修补（≤3 轮，
+每轮按原始地形重算方案再提交）** → 验收 → `terrain_done`。
 
-**仍未做的一条**：文档链首步「取 ZNetView 所有权」没实现——本骨架跑在**服务器端**，服务器本来就是
-owner，暂按不需要处理；若将来多人联机下出现地形不同步/不裂，再补这一步。
+| 规则 | 做法 |
+|---|---|
+| 朝向 | `[Build] Rotation`（度，俯视顺时针 = Unity yaw）：所有「蓝图 → 世界」换算只走 `ToWorld()`——绕包围盒中心转、再平移到落点；件朝向 = yaw × 件自身朝向；`#Terrain` 方形角度 = 条目角度 + Rotation；离线 `bp_reconcile.transform_pieces(rotation=)` 同式 |
+| 落地高度 | 地面层 = \|py − GroundLayerPy\| ≤ LayerTol（**上下都有界**：院墙模式下只设上界会把下层露台/地窖全算进来，整栋抬高 4m）；整栋偏移 = 中位数(实测地形 − 件 py) |
+| 平台高度 PadY | 地面层件碰撞体底面中位数 + Embed |
+| 占地 | 底面在 [PadY − Sink, PadY + Cap] 的件，xz 包围盒外扩 Pad；地表 = clamp(该点最低件底 + Embed, PadY, PadY + Cap)：略高的件垫土接住，略低的（柱脚）直接埋 |
+| 平台 | 占地做闭运算（半径 Close）：斜撑脚/柱脚之间 ≤ 2·Close 的空隙也整平到 PadY（= 先整出整块房基）；更大的内院保留 |
+| 深件 | 比 PadY 深 Sink 以上的非地窖件（深桩、下层露台的墙/台阶）不整平台、不挖坑——下层交给蓝图 #Terrain |
+| 地窖 | 名字含 floor、底面 < PadY − 0.5 的件：只在件自身范围挖到件底 + Embed（墙体挡土） |
+| 过渡带 | 平台外倒角距离变换 + smoothstep；宽度按平台边界最大高差自适应，使最陡处 ≤ SkirtSlope（1.5·Δ/D），夹在 [Skirt, SkirtMax] |
+| 保护圈 | 圈内顶点跳过（dump 记 `X` 行供独立复核）；圈外 3m 内把过渡带 / #Terrain 权重平滑压到 0，圈边不留台阶 |
+| 蓝图 `#Terrain` | PlanBuild `PlacementComponent.PlaceBlueprint` 原样：circle/square（含旋转）、`CalculateSmooth`、paint |
+| 承重预演 + 接地修补 | 磨损冻结中、支撑锁放行，对本工具件跑原版 `UpdateSupport` 到收敛（= 删插件后玩家走近时每件从满支撑衰减到的值），撑不住的关碰撞体（= 原版塌掉）再算到不再新增。最底层的撑不住件（正下方没有别的撑不住件）脚下地面整到件底 + Embed（dump 记 `G`）：原版只认碰到地表才算接地，整块埋在土里也不算 → 埋住的挖出来（≤ `GroundFixMax` 7.5m）、悬空的垫起来（> Cap 只给包围盒高 ≥ 1.5m 的柱/墙/桩）；不动 P/B/E/保护圈、不埋不掏空还站得住的件；相对原始地形不超 ±8m − 0.5。剩下的撑不住件打「★ [承重预演] 删掉插件后预计会塌 N 件」 |
+| 原版地形件 | `mud_road_v2` 等（旧名自动映射 `_v2`）不建 ZDO，**当作者地面的采样点**（锄头点在哪、地面就在哪）：R 内反距离² 插值、离采样点原版平滑权重 1−(d/R)³ ≥ 0.5 的核心进平台硬目标（与占地取高），采样面上方 Cap 内的件底垫到件底 + Embed；刷漆按该件自己的 paint 设置。**不再**交给原版 `DoOperation`：这版游戏的「整地」`mud_road_v2` 只是向操作点高度平滑、每顶点 `m_smoothDelta` 累计夹在 ±1m，换一块地重放还原不出作者那片地（longhouse 木桩墙下 3–5m 的土坡没了 → 整排塌）；且 `DoOperation` 只 `Poke(1)`（下一帧才刷新 heights），同帧连做会按旧高度叠错 |
+
+**反射成员**（2026-09-23 对 `assembly_valheim.dll` 逐个核对**可见性**，改动前请重新核对）：
+
+| 成员 | 可见性 |
+|---|---|
+| `TerrainComp.m_levelDelta / m_smoothDelta / m_modifiedHeight / m_paintMask / m_modifiedPaint / m_operations / m_lastOpPoint / m_lastOpRadius` | private → `AccessTools.Field`（启动地形段时缺任何一个即整段放弃并点名） |
+| `TerrainComp.Save(bool paintOnly)` | private → `AccessTools.Method`（**完整参数类型**，#22 教训） |
+| `WearNTear.GetSupportColorValue() / HaveSupport()` | private → `AccessTools.Method`（承重观测；取不到则观测整段跳过并报错） |
+| `WearNTear.UpdateSupport() / ClearCachedSupport() / GetMaxSupport() / GetMinSupport()`、字段 `m_support` | private（承重预演：磨损冻结中直接调原版 `UpdateSupport` 跑到收敛；取不到则预演跳过并报错） |
+| `Heightmap.m_heights`（`List<float>`，行主序 `z*(w+1)+x`） | private |
+| `Heightmap.Poke(int,bool) / VertexMaskToWorld / GetAndCreateTerrainCompiler / HaveQueuedRebuild / IsDistantLod / static GetHeight / c_LevelMaxDelta / m_paintMaskDirt…` | public，直接调 |
+
+**验收**：满权重顶点重算后误差（>0.5m 不写 flag）；占地露缝（地表比该点最低件底低 >0.15m）；
+`bp_terrain_dump.csv` 逐顶点 改前/目标/改后（+ 下次起服 `VerifyOnReload` 追加 `reload` 列）→
+`tools/bp_terrain_report.py` 出断崖 / 保护圈 / 持久化判据和三联对比图。
+
 初版有 4 处引用/using 层面的编译错误（41 处报错全是级联），已按 issue #2 修复：
 
 | # | 位置 | 修复 |
@@ -146,9 +181,9 @@ dotnet build XiBpBuilder.csproj -c Release
 | 0 Activate | `Game.FixedUpdate` postfix 覆盖 refPos | **总开关**，服务端认领 ~96m 内持久 ZDO |
 | 1 Freeze | `WearNTear.UpdateWear` prefix return false | 手术窗口，防地基先塌 |
 | 2 Cleanup | `ZDO.SetPosition(6000,-400,6000)` | 搬走不删除；等激活后扫；清非持久；保护圈 |
-| 3 Terrain | 双写 `m_heights`+`m_levelDelta`，增量公式，±8m | 无 +0.5；重建调用链（`ApplyModifiers` 在 Heightmap 侧）；`m_heights` 是 `List<float>` + 布局自检；**delta 丢失风险→首选天然平地** |
+| 3 Terrain | PlanBuild 式：只改 TerrainComp delta → ClaimOwnership → Save(false) → Poke(0,false) | **建造之后**按件真实碰撞体逐点整地；只改占地 + 自适应过渡带；保护圈不碰；±8m 超限整段放弃 |
 | 4 Build | `CreateNewZDO`+`SetPrefab`+`SetPosition/Rotation`+`SetOwner(0)` | 当场校验 `GetPrefab()==hash`；按 py 低→高 |
-| 5 Anchor | 逐件 `OverlapBox` 测 d_i → 必死件判据 → 整体位移 | 判据是必死件不是锚点数；闭环≤3 轮 |
+| 5 Anchor | 逐件 `OverlapBox` 测 d_i → 必死件判据 → 整体位移 | 判据是必死件不是锚点数；闭环≤3 轮；**整过地时跳过** |
 | 6 Reconcile | 反射 `m_objectsByID`，key=hash\|x\|y\|z(×4量化) | 拿不到就放弃，宁缺勿重 |
 | 7 Save | 反射 `ZNet.DelayedSave(true)` | `SaveWorldAndPlayerProfiles` 会 NRE |
 

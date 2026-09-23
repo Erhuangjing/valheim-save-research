@@ -15,6 +15,7 @@
 2026-09-23 Terrain 段重写为 PlanBuild 式逐点整地（见下节「Terrain 段」）后按同一口径（只替换 `REPLACE_ME`）
 重新编译：0 警告 0 错误，产物 61,952 字节；副本世界测试服三个蓝图实机验收（skeggoxmanor / nelesstarterbase /
 longhouse，数字见 `skills/valheim-blueprint-build/SKILL.md`「实测基准」）。
+同日加承重观测、锄头件采样、承重预演 + 接地修补后：0 警告 0 错误，产物 78,336 字节；三个蓝图关锁 + 区域激活实测。
 **运行状态**：隔离环境端到端实测通过（清障→落地→保存，1805/1805 零丢失、prefab 校验失败 0、
 坐标公式反推精确吻合）。已修的运行期问题分三轮：
 第一轮（#7 uint32 hash 溢出 / #8 锚点 NRE 静默 / #9 GUID 致 cfg 不通用）；
@@ -28,7 +29,8 @@ false 掉件 3.7%~15.9%、true ±0）、**#12 锚点位移重构**（全集统�
 
 | 项 | 行为 | 依据 |
 |---|---|---|
-| `Support.Enabled` | **默认 true**。「锚点成功则不需锁」已被 A/B 实测证伪 | #13 |
+| `Support.Enabled` | 默认 true，但**只管插件在的时候**：删掉插件后玩家走近，原版承重照常重算（每次载入区域都从满支撑往下衰减），锁着时的存活率不代表不塌 | #13 |
+| 承重观测 | `[Support] ObserveMinutes`（`bp_pipeline.py observe`）：支撑锁关 + 区域激活（服务器替玩家把工地实例化、跑原版 `UpdateWear/UpdateSupport`），解冻同一帧拍快照，每 `ObserveInterval` 秒记件数 + 锤子同款承重色（`GetSupportColorValue`）；结束列塌件（prefab、材质、蓝图坐标 → `bp_observe_lost.csv`）；观测期本工具件塌掉不掉建材 | 本轮 |
 | 锚点位移对象 | **本 run 创建的全集**（`s_ourZdoIds`），等实例化齐后每轮统一位移，结束后全量 Δy 校验；**对账补建路径跳过锚点**（只重建缺失件，整体位移会撕裂建筑，以 cfg `YOffset` 为准） | #12 |
 | ⚠ PatchAll 坑 | `PatchAll(Type)` 只补那一个类，**不是整个程序集**——新增补丁类必须逐个注册；启动时打印 `GetAllPatchedMethods()` 实际挂载数自检 | #13 附 |
 | Terrain | **2026-09-23 重写为 PlanBuild 式逐点整地**（下节）：只改占地 + 过渡带；保护圈内一个顶点都不改；任一满权重顶点需改超 ±8m 整段放弃；验收不过不写 `terrain_done` | 本轮 |
@@ -50,7 +52,8 @@ zone 交界成断层；直写 `m_heights` + 自拼 6 步重建链，zone 重载�
 跨 zone 边界的共享顶点两侧各写一份 → 不留缝。
 
 **时序**：实测 PlatformY → 放件（磨损冻结、支撑锁定）→ 等实例化 → 量本工具件的**真实碰撞体**（整棵子树）
-→ 生成方案 → 预演（保护圈 / ±8m 检查，不过则一个顶点都不写）→ 提交 → 等重算 → 原版地形件 → 验收 → `terrain_done`。
+→ 生成方案 → 预演（保护圈 / ±8m 检查，不过则一个顶点都不写）→ 提交 → 等重算 → **承重预演 → 接地修补（≤3 轮，
+每轮按原始地形重算方案再提交）** → 验收 → `terrain_done`。
 
 | 规则 | 做法 |
 |---|---|
@@ -64,14 +67,17 @@ zone 交界成断层；直写 `m_heights` + 自拼 6 步重建链，zone 重载�
 | 过渡带 | 平台外倒角距离变换 + smoothstep；宽度按平台边界最大高差自适应，使最陡处 ≤ SkirtSlope（1.5·Δ/D），夹在 [Skirt, SkirtMax] |
 | 保护圈 | 圈内顶点跳过（dump 记 `X` 行供独立复核）；圈外 3m 内把过渡带 / #Terrain 权重平滑压到 0，圈边不留台阶 |
 | 蓝图 `#Terrain` | PlanBuild `PlacementComponent.PlaceBlueprint` 原样：circle/square（含旋转）、`CalculateSmooth`、paint |
-| 原版地形件 | `mud_road_v2` 等（旧名自动映射 `_v2`）不建 ZDO，交给原版 `TerrainComp.DoOperation`（= RPC_ApplyOperation 里 owner 做的那步） |
+| 承重预演 + 接地修补 | 磨损冻结中、支撑锁放行，对本工具件跑原版 `UpdateSupport` 到收敛（= 删插件后玩家走近时每件从满支撑衰减到的值），撑不住的关碰撞体（= 原版塌掉）再算到不再新增。最底层的撑不住件（正下方没有别的撑不住件）脚下地面整到件底 + Embed（dump 记 `G`）：原版只认碰到地表才算接地，整块埋在土里也不算 → 埋住的挖出来（≤ `GroundFixMax` 7.5m）、悬空的垫起来（> Cap 只给包围盒高 ≥ 1.5m 的柱/墙/桩）；不动 P/B/E/保护圈、不埋不掏空还站得住的件；相对原始地形不超 ±8m − 0.5。剩下的撑不住件打「★ [承重预演] 删掉插件后预计会塌 N 件」 |
+| 原版地形件 | `mud_road_v2` 等（旧名自动映射 `_v2`）不建 ZDO，**当作者地面的采样点**（锄头点在哪、地面就在哪）：R 内反距离² 插值、离采样点原版平滑权重 1−(d/R)³ ≥ 0.5 的核心进平台硬目标（与占地取高），采样面上方 Cap 内的件底垫到件底 + Embed；刷漆按该件自己的 paint 设置。**不再**交给原版 `DoOperation`：这版游戏的「整地」`mud_road_v2` 只是向操作点高度平滑、每顶点 `m_smoothDelta` 累计夹在 ±1m，换一块地重放还原不出作者那片地（longhouse 木桩墙下 3–5m 的土坡没了 → 整排塌）；且 `DoOperation` 只 `Poke(1)`（下一帧才刷新 heights），同帧连做会按旧高度叠错 |
 
 **反射成员**（2026-09-23 对 `assembly_valheim.dll` 逐个核对**可见性**，改动前请重新核对）：
 
 | 成员 | 可见性 |
 |---|---|
 | `TerrainComp.m_levelDelta / m_smoothDelta / m_modifiedHeight / m_paintMask / m_modifiedPaint / m_operations / m_lastOpPoint / m_lastOpRadius` | private → `AccessTools.Field`（启动地形段时缺任何一个即整段放弃并点名） |
-| `TerrainComp.Save(bool paintOnly)`、`DoOperation(Vector3 pos, Vector3 rot, TerrainOp.Settings)` | private → `AccessTools.Method`（**完整参数类型**，#22 教训） |
+| `TerrainComp.Save(bool paintOnly)` | private → `AccessTools.Method`（**完整参数类型**，#22 教训） |
+| `WearNTear.GetSupportColorValue() / HaveSupport()` | private → `AccessTools.Method`（承重观测；取不到则观测整段跳过并报错） |
+| `WearNTear.UpdateSupport() / ClearCachedSupport() / GetMaxSupport() / GetMinSupport()`、字段 `m_support` | private（承重预演：磨损冻结中直接调原版 `UpdateSupport` 跑到收敛；取不到则预演跳过并报错） |
 | `Heightmap.m_heights`（`List<float>`，行主序 `z*(w+1)+x`） | private |
 | `Heightmap.Poke(int,bool) / VertexMaskToWorld / GetAndCreateTerrainCompiler / HaveQueuedRebuild / IsDistantLod / static GetHeight / c_LevelMaxDelta / m_paintMaskDirt…` | public，直接调 |
 

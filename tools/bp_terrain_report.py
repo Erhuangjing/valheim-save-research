@@ -5,12 +5,15 @@ dump 由 XiBpBuilder 地形段写出（首行 `# PlatformY=..,PadY=..,ProtectX=.
     x,z,role,w,target,before,bottom,after[,reload]
     role: P 平台（占地 + 闭运算填补）/ B 地窖 / S 过渡带 / E 蓝图 #Terrain /
           X 本该改、因在保护圈内被跳过（before/after 都是游戏里实测 → 独立复核「一点没动」）/
-          V 原版地形件（vbuild 里作者的锄头整地/路面）后来又改过 —— 最终形状归作者，与 E 同等对待
+          V 锄头件采样（vbuild 里作者锄过的地面：锄头点在哪、地面就在哪）—— 逐点整到采样高度，满权重，同 P 验收；
+            采样面本身的陡坎是作者那片地的形状，断崖判据里与 E 同等对待 /
+          G 接地修补（承重预演判定删掉插件会塌的最底层件，脚下地面整到件底：作者那片地的坡 / 坑，蓝图没记）——同 V
     w = 拉向 target 的权重（1 = 整平到位）；bottom = 该平台顶点上最低件的碰撞体底面
 
 判据（对应正式服实测的两类事故）：
-  断崖   相邻顶点（1m）高差 > --cliff（默认 1.5m）。一端是 B/E/V 的记「挡土墙」（地窖坑壁、作者用 #Terrain 挖的
-         院子/露台——PlanBuild 回放同样是直壁，属设计）；两端都是本工具生成的平台/过渡带才判失败（= 断层）
+  断崖   相邻顶点（1m）高差 > --cliff（默认 1.5m），分三类：一端是 B/E/V/G 或在它们 2m 内的记「挡土墙」（地窖坑壁、
+         作者用 #Terrain 挖的院子/露台、作者地面的坡、接地挖出的坑——PlanBuild 回放同样是直壁，属设计）；改后比改前
+         陡不超过 0.3m 或 15% 的记「原地形本来的陡坎」；其余 = 本工具整出来的断层，才判失败
   露缝   平台顶点地表比 bottom 低 >0.15m（地基露出来）
   保护圈 圈内被改的顶点数必须为 0（主宅 + 护城河）
   平台   满权重顶点 |after − target| 的 p95 / max
@@ -65,9 +68,8 @@ def analyze(meta, rows, cliff=1.5):
     has_after = any(r.get('after') is not None for r in rows)
     col = 'after' if has_after else 'target'
     # 平台精度（满权重顶点）
-    # V = 原版地形件后来又改过（作者设计），不按本工具目标算误差
     errs = [abs(r['after'] - r['target']) for r in rows
-            if has_after and r['w'] >= 0.999 and r['role'] != 'V' and r.get('after') is not None]
+            if has_after and r['w'] >= 0.999 and r.get('after') is not None]
     rep['flat_err_p95'] = _pct(errs, 0.95)
     rep['flat_err_max'] = max(errs) if errs else None
     # 改动量
@@ -85,19 +87,30 @@ def analyze(meta, rows, cliff=1.5):
             s = abs(r[col] - q[col])
             steps.append(s)
             if s > cliff:
+                b0 = abs(r['before'] - q['before']) if r.get('before') is not None and q.get('before') is not None else None
                 cliffs.append({'x': x, 'z': z, 'to': [x + dx, z + dz], 'step': round(s, 2),
-                               'roles': r['role'] + q['role']})
+                               'roles': r['role'] + q['role'], 'before_step': b0})
     rep['slope_deg_p99'] = round(math.degrees(math.atan(_pct(steps, 0.99))), 1) if steps else None
     rep['slope_deg_max'] = round(math.degrees(math.atan(max(steps))), 1) if steps else None
     rep['cliffs'] = len(cliffs)
-    # 一端是 B（地窖坑壁）或 E（蓝图 #Terrain：作者挖的院子/露台，PlanBuild 回放同样是直壁）= 挡土墙，属设计；
-    # 两端都是本工具自己生成的平台/过渡带（P/S/X）才是我们整出来的断层
-    ours = [c for c in cliffs if not set(c['roles']) & set('BEV')]
-    rep['cliffs_retaining'] = len(cliffs) - len(ours)
+    # 三类：① 挡土墙 = 一端是 B/E/V/G 或在它们 2m 内（地窖坑壁、作者 #Terrain 院子、作者地面的坡、接地挖出的坑——
+    #   两块设计高度紧挨着，中间再陡也只能这样；PlanBuild 回放同样是直壁）；② 原地形本来的陡坎（改后比改前陡不超过 0.3m 或 15%，
+    #   过渡带末端 w≈0 处常见）；③ 其余 = 本工具整出来的断层，必须为 0
+    design = {k for k, r in grid.items() if r['role'] in 'BEVG'}
+
+    def near_design(x, z):
+        return any((x + a, z + b) in design for a in range(-2, 3) for b in range(-2, 3) if a * a + b * b <= 4)
+    retaining = [c for c in cliffs if set(c['roles']) & set('BEVG') or near_design(c['x'], c['z'])
+                 or near_design(*c['to'])]
+    natural = [c for c in cliffs if c not in retaining and c['before_step'] is not None
+               and c['step'] <= c['before_step'] + max(0.3, 0.15 * c['before_step'])]
+    ours = [c for c in cliffs if c not in retaining and c not in natural]
+    rep['cliffs_retaining'] = len(retaining)
+    rep['cliffs_natural'] = len(natural)
     rep['cliffs_ours'] = len(ours)
     rep['cliff_samples'] = sorted(ours or cliffs, key=lambda c: -c['step'])[:8]
     # 露缝：平台顶点的地表比该点最低件底低 >0.15m（dump 有 bottom 列时）= 地基露出来
-    gp = [r for r in rows if r['role'] == 'P' and r.get('bottom') is not None and r.get(col) is not None]
+    gp = [r for r in rows if r['role'] in ('P', 'V') and r.get('bottom') is not None and r.get(col) is not None]
     rep['gap_checked'] = len(gp)
     rep['gaps'] = sum(1 for r in gp if r[col] < r['bottom'] - 0.15)
     # 过渡带末端连续性：w 很小的点几乎没动
@@ -217,8 +230,10 @@ def print_report(meta, rep, bad):
         print('平台（满权重顶点）误差 p95=%.3f max=%.3f m' % (rep['flat_err_p95'], rep['flat_err_max']))
     if rep['delta_min'] is not None:
         print('改动量 %.2f ~ %+.2f m，实际变化 >5cm 的顶点 %d 个' % (rep['delta_min'], rep['delta_max'], rep['changed']))
-    print('坡度 p99=%s° max=%s°；断崖(>1.5m/1m) %d 处 = 挡土墙（地窖/蓝图地形）%d + 平台/过渡带 %d'
-          % (rep['slope_deg_p99'], rep['slope_deg_max'], rep['cliffs'], rep['cliffs_retaining'], rep['cliffs_ours']))
+    print('坡度 p99=%s° max=%s°；断崖(>1.5m/1m) %d 处 = 挡土墙（地窖/蓝图地形/作者地面/接地坑及其 2m 内）%d'
+          ' + 原地形本来的陡坎 %d + 平台/过渡带 %d'
+          % (rep['slope_deg_p99'], rep['slope_deg_max'], rep['cliffs'], rep['cliffs_retaining'],
+             rep['cliffs_natural'], rep['cliffs_ours']))
     if rep['gap_checked']:
         print('平台露缝（地表低于该点最低件底 >0.15m）：%d / %d' % (rep['gaps'], rep['gap_checked']))
     for c in rep['cliff_samples'][:4]:
@@ -284,6 +299,15 @@ def selftest():
             r['target'] = r['reload'] = r['after']       # 蓝图地形点：到位（目标即作者的高度），且已持久化
     rep = analyze(meta, rows)
     check('记为挡土墙、结论仍通过', rep['cliffs_retaining'] >= 1 and rep['cliffs_ours'] == 0 and not verdict(rep))
+    print('== 原地形本来的陡坎（过渡带末端 w≈0，改后没更陡）不判失败 ==')
+    meta, rows = make()
+    for r in rows:
+        if r['x'] >= 10:                                  # x=9→10 之间原地形就有 3m 陡坎
+            r['before'] += 3.0
+            r['after'] = r['before'] + r['w'] * (50 - r['before'])
+            r['reload'] = r['after']
+    rep = analyze(meta, rows)
+    check('记为原地形陡坎、结论仍通过', rep['cliffs_natural'] >= 1 and rep['cliffs_ours'] == 0 and not verdict(rep))
     print('== 露缝 ==')
     meta, rows = make()
     for r in rows:

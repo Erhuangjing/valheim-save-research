@@ -41,6 +41,10 @@ python tools/bp_reconcile.py --manifest out/manifest.json --world "$VH_WORLD" \
 # 七段编排（一条命令跑完 preflight → report）
 python tools/bp_pipeline.py all --bp <某.blueprint> --work runs/1 \
     --world "$VH_WORLD" --server "$VH_SERVER" --i-have-a-backup
+
+# 承重验收（落地后必做）：关支撑锁 + 区域激活，原版承重跑 5 分钟，看件数时序与承重色；
+# 塌件逐件写 runs/1/bp_observe_lost.csv（prefab、材质、蓝图坐标）
+python tools/bp_pipeline.py observe --work runs/1 --server "$VH_SERVER" --bat <启动脚本> --observe-minutes 5
 ```
 
 `bp_pipeline.py` 有**铁律内建**：动档前必须有备份记录（`--i-have-a-backup`），

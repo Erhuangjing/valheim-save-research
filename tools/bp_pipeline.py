@@ -25,6 +25,7 @@
   5. 地下结构（preflight 报 underground>0）默认劝退，all 需 --allow-high-risk 才继续
 """
 import argparse
+import csv
 import json
 import os
 import re
@@ -55,6 +56,9 @@ MARKERS = {
     'abort':      re.compile(r'===\s*编排中止[^\n]*'),
     'anchorskip': re.compile(r'\[锚点\]\s*跳过：地形已按件底'),
     'reload':     re.compile(r'★\s*\[地形\]\s*重载复核：(\d+)\s*个顶点.*?max=([\d.]+|NaN)m[^\n]*'),
+    'observe_end': re.compile(r'★\s*\[观测\]\s*结束：(\d+)s\s*内本工具件\s*(\d+)\s*→\s*(\d+)'),
+    'observe_line': re.compile(r'\[观测\]\s*t=[^\n]*'),
+    'doomed':     re.compile(r'★\s*\[承重预演\]\s*删掉插件后预计(?:一件不塌|会塌\s*(\d+)\s*件)[^\n]*'),
     'instready':  re.compile(r'实例化就绪|\[锚点\]\s*求解开始'),
     'round':      re.compile(r'\[锚点\]\s*第\s*(\d+)\s*轮.*?必死\s*=\s*(\d+).*?锚点\s*=\s*(\d+)'),
     'builtdone':  re.compile(r'★\s*落地完成：\s*(\d+)\s*件.*?校验失败\s*(\d+)\s*次'),
@@ -292,7 +296,7 @@ def gen_cfg(p):
                                    '必须手填（0 = 贴地硬边界），issue #8'),
                   ('GroundLayerPy', p['ground_py']),
                   ('AutoDetectGroundLayer', 'true'), ('PerPieceGround', 'false'),
-                  ('Force', 'false'), ('Reconcile', 'true'),
+                  ('Force', 'false'), ('Reconcile', 'true' if p.get('reconcile', True) else 'false'),
                   ('BatchSize', '60'), ('FrameDelay', '10'), ('PieceFile', 'bp_pieces.txt'),
                   ('AutoPlatformY', 'true', '落地高度在游戏里实测（地面层件位置的地形中位数）；false = 用 [Terrain] PlatformY'),
                   ('Rotation', p.get('rotation', 0), '蓝图朝向（度，俯视顺时针，绕蓝图包围盒中心）：90 = 原来朝北的门改朝东')])
@@ -301,7 +305,7 @@ def gen_cfg(p):
                     ('Center1X', p['site_x']), ('Center1Z', p['site_z']), ('Radius1', p['radius']),
                     ('ProtectX', p['protect_x']), ('ProtectZ', p['protect_z']), ('ProtectRadius', p.get('protect_r', 20))])
     sec('Terrain', [('Enabled', 'true' if p.get('terrain', True) else 'false',
-                     'PlanBuild 式逐点整地：占地整平 + 过渡带 + 地窖 + 蓝图 #Terrain + 原版地形件；保护圈内不改'),
+                     'PlanBuild 式逐点整地：占地整平 + 过渡带 + 地窖 + 蓝图 #Terrain + 锄头件（作者地面采样点）+ 接地修补；保护圈内不改'),
                     ('DryRun', 'true' if p.get('terrain_dry') else 'false'),
                     ('PlatformY', p['platform_y'], 'AutoPlatformY=false 或测不到地形时才用（autosite 离线代理估计）'),
                     ('Embed', '0.1'), ('Skirt', p.get('skirt', 6), '过渡带最小宽度；按边界高差自动加宽到坡度 ≤ SkirtSlope'),
@@ -309,13 +313,18 @@ def gen_cfg(p):
                     ('Close', '3', '贴地件之间 ≤ 2×Close 米的空隙整成同一块平台（玩家先整出整块房基）；0 = 关'),
                     ('Sink', '1', '比平台深 Sink 米以上的非地窖件（深桩/下层露台）不整平台不挖坑'),
                     ('MaxDelta', '8', '游戏硬限 ±8m：任一满权重顶点超限 → 整段放弃，一个顶点都不改'),
+                    ('GroundFix', 'true', '承重预演（原版 UpdateSupport 跑到收敛）后，给删掉插件会塌的最底层件接地：埋住的挖出来、悬空的垫起来，最多 3 轮'),
+                    ('GroundFixMax', '7.5', '接地修补单点最多挖 / 垫多少米（垫超过 Cap 只给包围盒高 ≥1.5m 的柱/墙/桩）'),
                     ('Paint', 'Dirt'), ('EntryFile', 'bp_terrain.txt'), ('DumpFile', 'bp_terrain_dump.csv'),
                     ('VerifyOnReload', 'true')])
     sec('Activate', [('Enabled', 'true'), ('X', p['site_x']), ('Y', '0'), ('Z', p['site_z'])])
     sec('Anchor', [('AutoSolve', 'true'), ('Target', '200'), ('MaxShift', '2'), ('SinkStep', '0.05')])
-    sec('Support', [('Enabled', 'true', 'issue #13：默认开。锚点求解成功（必死=0）≠ 件不会被磨损打坏——'
-                                   '原生磨损在解冻后照样销毁（A/B 实测 false 掉件 3.7~15.9%，true ±0）；锁只作用于本工具件'),
-                    ('Diagnose', 'true')])
+    sec('Support', [('Enabled', 'true' if p.get('support', True) else 'false',
+                     'issue #13：默认开，落地窗口里锁住本工具件的支撑。⚠ 锁着就测不到真实承重——'
+                     '删掉插件后是否会塌，用 bp_pipeline.py observe（关锁 + 区域激活 + 观测件数时序）验'),
+                    ('Diagnose', 'true'),
+                    ('ObserveMinutes', p.get('observe_minutes', 0), '承重观测时长（分钟，0 = 不观测）'),
+                    ('ObserveInterval', '10')])
     return '\n'.join(L)
 
 
@@ -384,7 +393,7 @@ def cmd_install(a, st):
     # 铁律 2：重跑 = 删 flag；本工具永不写 Force=true。
     # 运行时状态（首测 PlatformY）与地形 dump 属于上一轮落点，全新落地必须一起清，否则会沿用旧高度
     cfg_dir = os.path.join(bep, 'config')
-    for fl in [f for f in os.listdir(cfg_dir) if f.endswith('.flag') or f in ('bp_runtime.txt', 'bp_terrain_dump.csv')]:
+    for fl in [f for f in os.listdir(cfg_dir) if f.endswith('.flag') or f in ('bp_runtime.txt', 'bp_terrain_dump.csv', 'bp_observe_lost.csv')]:
         os.remove(os.path.join(cfg_dir, fl))
         print('  已清残留: %s' % fl)
     stage(st, 'install', ok=True, params=params, cfg=a.cfg_guid + '.cfg')
@@ -450,13 +459,16 @@ def cmd_run(a, st):
             with open(os.path.join(a.work, 'bp_markers.log'), 'a', encoding='utf-8') as f:
                 f.write(text)
             for k in ('owned', 'instready', 'builtdone', 'anchordone', 'recon', 'saved',
-                      'platform', 'terrain', 'anchorskip', 'reload', 'abort'):
+                      'platform', 'terrain', 'anchorskip', 'reload', 'abort', 'observe_end', 'doomed'):
                 m = MARKERS[k].search(text)
                 if m:
                     seen[k] = m.groups() if m.groups() else (m.group(0),)
             seen['rounds'] += MARKERS['round'].findall(text)
             seen['health'] += MARKERS['health'].findall(text)
             seen.setdefault('terrainerr', []).extend(MARKERS['terrainerr'].findall(text))
+            for ln in MARKERS['observe_line'].findall(text):
+                seen.setdefault('observe', []).append(ln)
+                print('  ' + ln)                                # 承重观测时序实时打出来
             if 'abort' in seen and finish_at is None:
                 finish_at = time.time() - a.observe          # 编排中止不会再有「编排完成」：立即停服，别等超时
                 print('✗ 编排中止：%s' % seen['abort'][0])
@@ -508,18 +520,38 @@ def cmd_run(a, st):
     if 'terrain' in seen:
         n, p95, mx, fn, gp = seen['terrain']
         terrain = {'verts': int(n), 'err_p95': float(p95), 'err_max': float(mx), 'foot_verts': int(fn), 'gaps': int(gp)}
-    dump = os.path.join(cfg_dir, 'bp_terrain_dump.csv')
-    if os.path.isfile(dump):
-        shutil.copy2(dump, os.path.join(a.work, 'bp_terrain_dump.csv'))
+    for fn in ('bp_terrain_dump.csv', 'bp_observe_lost.csv'):   # 逐顶点地形 / 观测期塌损件明细
+        if os.path.isfile(os.path.join(cfg_dir, fn)):
+            shutil.copy2(os.path.join(cfg_dir, fn), os.path.join(a.work, fn))
+    # 承重预演（落地时、磨损冻结中跑原版承重到收敛）：只是预测，真塌不塌以 observe 为准
+    doomed = None
+    if 'doomed' in seen:
+        doomed = int(seen['doomed'][0] or 0)
+        print('%s 承重预演：删掉插件后预计%s' % ('✓' if doomed == 0 else '⚠', '一件不塌' if doomed == 0
+              else '会塌 %d 件（接地修补够不着的；observe 会真塌给你看）' % doomed))
+    # 承重观测（支撑锁关 + 区域激活）：件数时序不减 = 删掉插件后也不会塌
+    obs = None
+    if 'observe_end' in seen:
+        secs, n0, n1 = (int(v) for v in seen['observe_end'])
+        obs = {'seconds': secs, 'start': n0, 'end': n1, 'lost': n0 - n1,
+               'last': (seen.get('observe') or [None])[-1], 'series': seen.get('observe', [])}
+        lost_csv = os.path.join(a.work, 'bp_observe_lost.csv')
+        if n1 < n0 and os.path.isfile(lost_csv):
+            obs['lost_by'] = lost_summary(lost_csv)
+        stage(st, 'observe', ok=n1 >= n0, **obs)
+        print('%s 承重观测 %ds：本工具件 %d → %d%s' % ('✓' if n1 >= n0 else '✗', secs, n0, n1,
+              '（一件没塌）' if n1 >= n0 else '（塌/损 %d 件）' % (n0 - n1)))
+        for row in obs.get('lost_by', [])[:12]:
+            print('    塌 %-28s %-9s ×%-3d 蓝图 py %s' % (row['prefab'], row['mat'], row['n'], row['py']))
     if 'reload' in seen and 'builtdone' not in seen:
-        # 复核 run（flag 都在、没新建件）：只看地形持久化，别拿全新落地的判据去判
+        # 复核 run（flag 都在、没新建件）：看地形持久化 +（有的话）承重观测，别拿全新落地的判据去判
         n, mx = seen['reload'][0], seen['reload'][1]
         ok = mx != 'NaN' and float(mx) <= 0.05
         stage(st, 'run_reload', ok=ok, verts=int(n), max_diff=None if mx == 'NaN' else float(mx),
               line=seen['reload'][-1] if len(seen['reload']) > 2 else None)
         print('%s 重载复核：%s 个顶点 |reload − 落地时| max=%sm → %s'
               % ('✓' if ok else '✗', n, mx, '持久化 ✓（地形在 zone 重载后原样还在）' if ok else '✗ 地形与落地当时不一致'))
-        return ok
+        return ok and (obs is None or obs['lost'] <= 0)
     checks = {
         '落点可用(未中止)': 'abort' not in seen,
         '激活生效': owned > 0,
@@ -533,12 +565,13 @@ def cmd_run(a, st):
         '进程内对账': ('recon' in seen) if 'builtdone' not in seen else None,   # 只有对账补建路径才有
         '已触发保存': 'saved' in seen,
         '件数时序稳定': stable,   # None=样本不足，需人工看日志
+        '承重观测：件数不减': (obs['lost'] <= 0) if obs else None,
     }
     ok = all(v for v in checks.values() if v is not None)
     stage(st, 'run', ok=ok, owned=owned, built=built, fail=fail, sink=sink,
           platform_y=float(runtime['PlatformY']) if 'PlatformY' in runtime else None,
           terrain=terrain, terrain_errors=seen.get('terrainerr', [])[:10],
-          abort=seen.get('abort', [None])[0],
+          abort=seen.get('abort', [None])[0], predicted_collapse=doomed,
           rounds=seen['rounds'], health=seen['health'], checks={k: v for k, v in checks.items()})
     for k, v in checks.items():
         print('  %s %s' % ('✓' if v else ('—' if v is None else '✗'), k))
@@ -548,6 +581,35 @@ def cmd_run(a, st):
           % ('合格' if ok else '不合格', built, exp, runtime.get('PlatformY', '?'), sink,
              '' if not terrain else '，地形误差 max %.2fm、占地露缝 %d/%d' % (terrain['err_max'], terrain['gaps'], terrain['foot_verts'])))
     return ok
+
+
+def lost_summary(path):
+    """bp_observe_lost.csv（执行器观测结束写：prefab,mat,px,py,pz,wx,wy,wz）→ 按 prefab+材质聚合，数量降序"""
+    groups = {}
+    with open(path, encoding='utf-8-sig') as f:
+        for r in csv.DictReader(f):
+            g = groups.setdefault((r['prefab'], r.get('mat', '-')), [])
+            g.append(float(r['py']))
+    rows = [{'prefab': k[0], 'mat': k[1], 'n': len(v),
+             'py': '%.1f' % v[0] if len(v) == 1 else '%.1f~%.1f' % (min(v), max(v))} for k, v in groups.items()]
+    return sorted(rows, key=lambda r: -r['n'])
+
+
+# ---------------------------------------------------------------- 5b. observe（承重验收）
+def cmd_observe(a, st):
+    """在已落地的建筑上验承重：关支撑锁 + 关对账补建 + 开观测，flag 全保留（不重建、不改地形），起服看件数时序。
+    区域激活让服务器替玩家把工地实例化、跑原版承重 —— 锁一关，该塌的就会真塌（= 删掉插件后玩家走近时的样子）。"""
+    p = dict(st['stages'].get('install', {}).get('params') or {})
+    if not p:
+        die('observe 前需要 install（state 里没有落点参数）')
+    require_server_down('observe', a.server)
+    p.update(support=False, reconcile=False, observe_minutes=a.observe_minutes)
+    cfg = os.path.join(a.server, 'BepInEx', 'config', a.cfg_guid + '.cfg')
+    with open(cfg, 'w', encoding='utf-8') as f:
+        f.write(gen_cfg(p))
+    print('✓ cfg 改为承重观测：支撑锁关、对账补建关、观测 %.0f 分钟（flag 全保留：不重建、不改地形）' % a.observe_minutes)
+    a.timeout = max(a.timeout, int(a.observe_minutes * 60) + 600)
+    return cmd_run(a, st)
 
 
 # ---------------------------------------------------------------- 6. verify
@@ -586,10 +648,13 @@ def cmd_verify(a, st):
     with open(os.path.join(a.work, 'reconcile.json'), 'w', encoding='utf-8') as f:
         json.dump(res, f, ensure_ascii=False, indent=1)
     stage(st, 'verify', ok=res['pass'], identity=ident, **{k: res[k] for k in
-          ('expected', 'matched', 'missing', 'rate', 'extra_in_bbox_total')})
-    print('离线对账：期望 %d | 匹配 %d | 缺失 %d | 盒内多出 %d → 存活率 %.2f%% %s'
-          % (res['expected'], res['matched'], res['missing'], res['extra_in_bbox_total'],
-             res['rate'] * 100, '✅' if res['pass'] else '❌'))
+          ('expected', 'matched', 'missing', 'moved', 'rate', 'rate_moved', 'extra_in_bbox_total')})
+    print('离线对账：期望 %d | 匹配 %d | 缺失 %d（其中挪位 %d）| 盒内多出 %d → 存活率 %.2f%%（算上挪位 %.2f%%）%s'
+          % (res['expected'], res['matched'], res['missing'], res['moved'], res['extra_in_bbox_total'],
+             res['rate'] * 100, res['rate_moved'] * 100, '✅' if res['pass'] else '❌'))
+    if res['moved']:
+        print('  挪位（件还在，被游戏贴地 / 滚动了：水平 ≤1m、高差 ≤3m）：%s'
+              % ', '.join('%s×%d' % kv for kv in res['moved_by'].items()))
     for m in res['missing_list'][:10]:
         print('  [缺] %-32s ×%d' % (m['name'], m['count']))
     return res['pass']
@@ -674,7 +739,9 @@ def cmd_report(a, st):
     v = st['stages'].get('verify') or {}
     if v:
         lines += ['## 离线对账（坑 C.2 双匹配）', '',
-                  '- 期望 %s 件，匹配 %s，缺失 %s，存活率 %.2f%%' % (v.get('expected'), v.get('matched'), v.get('missing'), (v.get('rate') or 0) * 100),
+                  '- 期望 %s 件，匹配 %s，缺失 %s（其中挪位 %s：植被贴地 / 推车滚动，件还在），存活率 %.2f%%（算上挪位 %.2f%%）'
+                  % (v.get('expected'), v.get('matched'), v.get('missing'), v.get('moved', 0), (v.get('rate') or 0) * 100,
+                     (v.get('rate_moved') or v.get('rate') or 0) * 100),
                   '- 明细：`reconcile.json`', '']
     td = st['stages'].get('teardown') or {}
     if td.get('quarantine'):
@@ -771,7 +838,7 @@ def selftest():
 # ---------------------------------------------------------------- CLI
 def main(argv=None):
     ap = argparse.ArgumentParser(description='蓝图落地七段流水线编排器（一条命令从解析到验收）')
-    ap.add_argument('cmd', nargs='?', choices=STAGES + ['all'])
+    ap.add_argument('cmd', nargs='?', choices=STAGES + ['all', 'observe'])
     ap.add_argument('--bp', help='蓝图文件（preflight/all）')
     ap.add_argument('--work', help='运行目录（state/manifest/备份/报告都放这）')
     ap.add_argument('--world', help='世界存档目录（含 .chunk/.chunks）')
@@ -809,6 +876,8 @@ def main(argv=None):
     ap.add_argument('--margin', type=float, default=15.0)
     ap.add_argument('--timeout', type=int, default=1800, help='run 段等「编排完成」的超时秒数')
     ap.add_argument('--observe', type=int, default=240, help='编排完成后的件数时序观察窗秒数')
+    ap.add_argument('--observe-minutes', type=float, default=5.0,
+                    help='observe 命令：插件内承重观测时长（分钟，默认 5；支撑锁关、区域激活，每 10s 记件数 + 承重色）')
     ap.add_argument('--structure-only', action='store_true', help='只落地 Building 类件（过滤家具）')
     ap.add_argument('--i-have-a-backup', action='store_true', help='跳过备份检查（自知有备份时）')
     ap.add_argument('--allow-high-risk', action='store_true', help='地下结构也硬闯（默认劝退）')
@@ -847,6 +916,8 @@ def main(argv=None):
         ok = cmd_verify(a, st)
     elif a.cmd == 'teardown':
         ok = cmd_teardown(a, st)
+    elif a.cmd == 'observe':
+        ok = cmd_observe(a, st)
     elif a.cmd == 'report':
         ok = cmd_report(a, st)
     else:  # all：逐段跑，失败的段重跑，已 ok 的跳过

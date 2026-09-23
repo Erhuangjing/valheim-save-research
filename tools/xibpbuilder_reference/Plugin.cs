@@ -77,6 +77,9 @@ namespace XiBpBuilder
         internal static ConfigEntry<int>    CfgAnchorTarget;
         // [Support]
         internal static ConfigEntry<bool>   CfgSupportOn, CfgSupportDiag;
+        internal static ConfigEntry<float>  CfgObserveMin, CfgObserveEvery;
+        internal static ConfigEntry<bool>   CfgGroundFix;
+        internal static ConfigEntry<float>  CfgGroundFixMax;
         internal static ConfigEntry<string> CfgMarkKey;
 
         private void Awake()
@@ -137,6 +140,9 @@ namespace XiBpBuilder
             CfgTerrainPaint = Config.Bind("Terrain", "Paint", "Dirt");     // 占地刷泥地（原版锄头整地同款，免得草从地板里长出来）；空 = 不刷
             CfgTerrainFile  = Config.Bind("Terrain", "EntryFile", "bp_terrain.txt");      // 蓝图 #Terrain 段（PlanBuild 原格式）
             CfgTerrainDump  = Config.Bind("Terrain", "DumpFile", "bp_terrain_dump.csv");  // 逐顶点 改前/目标/改后，离线出报告用
+            // 承重预演后给「删掉插件会塌」的最底层件接地：埋住的挖出来（≤ GroundFixMax）、悬空的垫起来（> Cap 只给高件），最多 3 轮
+            CfgGroundFix    = Config.Bind("Terrain", "GroundFix", true);
+            CfgGroundFixMax = Config.Bind("Terrain", "GroundFixMax", 7.5f);
             CfgVerifyOnReload = Config.Bind("Terrain", "VerifyOnReload", true);           // 下次起服时复核地形是否持久化
 
             CfgActOn = Config.Bind("Activate", "Enabled", true);        // ✓DOC: 总开关
@@ -153,6 +159,10 @@ namespace XiBpBuilder
             //（A/B 实测：false 掉件 3.7%~15.9%，true = ±0）；锁只作用于 mark==1 的本工具件
             CfgSupportOn   = Config.Bind("Support", "Enabled", true);
             CfgSupportDiag = Config.Bind("Support", "Diagnose", true);
+            // 承重观测（验「删掉插件后会不会塌」）：区域激活让服务器替玩家把工地实例化、跑原版承重；配合 Enabled=false
+            //（不锁支撑）→ 该塌的真塌。每 ObserveInterval 秒记一次件数 + 锤子同款承重色分布；0 = 不观测
+            CfgObserveMin   = Config.Bind("Support", "ObserveMinutes", 0f);
+            CfgObserveEvery = Config.Bind("Support", "ObserveInterval", 10f);
             CfgMarkKey     = Config.Bind("Support", "MarkKey", "xiabp");
 
             // ---- Harmony：逐个显式注册（✓DOC 坑 B：不是 CreateAndPatchAll，忘注册会静默失效）----
@@ -161,11 +171,12 @@ namespace XiBpBuilder
             harmony.PatchAll(typeof(PatchActivate));
             harmony.PatchAll(typeof(PatchFreezeWear));
             harmony.PatchAll(typeof(PatchSupportLock));
+            harmony.PatchAll(typeof(PatchNoDrop));
             // issue #13 附：补丁自检。⚠ PatchAll(Type) 只补那一个类、不是整个程序集——
             // 新增补丁类忘注册会静默失效（实测两轮探测全假阴性的教训）。
             // 启动时打印实际挂载数与方法名，与预期不符立刻能看出来。
             var patched = Harmony.GetAllPatchedMethods().ToList();
-            Log.LogInfo($"XiBpBuilder(ref) 已加载，patch 注册 4 个，实际挂载方法数 = {patched.Count}");
+            Log.LogInfo($"XiBpBuilder(ref) 已加载，patch 注册 5 个，实际挂载方法数 = {patched.Count}");
             foreach (var m in patched)
                 Log.LogInfo($"[patch]    {m.DeclaringType?.Name}.{m.Name}");
         }
@@ -228,7 +239,7 @@ namespace XiBpBuilder
 
             static bool Prefix(WearNTear __instance)
             {
-                if (!CfgSupportOn.Value) return true;
+                if (!CfgSupportOn.Value || s_solving) return true;       // 承重预演期间放行原版计算
                 var nv = __instance.GetComponent<ZNetView>();
                 if (nv == null || !nv.IsValid()) return true;
                 if (nv.GetZDO().GetInt(CfgMarkKey.Value, 0) != 1) return true;  // 只锁我们的件
@@ -241,6 +252,24 @@ namespace XiBpBuilder
             // ◐DOC: GetMaxSupport 是方法，反射调用（usagi §6 阈值表用的就是它）
             static readonly MethodInfo GetMaxSupport = AccessTools.Method(typeof(WearNTear), "GetMaxSupport");
             static float MaxOf(WearNTear w) => Convert.ToSingle(GetMaxSupport.Invoke(w, null));
+        }
+
+        // ====================================================================
+        //  Patch 5 —— 观测期塌件不掉建材：原版 WearNTear.Destroy → Piece.DropResources 会把建材撒一地
+        // ====================================================================
+        private static bool s_observing;
+        private static int s_noDrop;
+        [HarmonyPatch(typeof(global::Piece), "DropResources")]
+        public static class PatchNoDrop
+        {
+            static bool Prefix(global::Piece __instance)
+            {
+                if (!s_observing) return true;
+                var nv = __instance.GetComponent<ZNetView>();
+                if (nv == null || !nv.IsValid() || nv.GetZDO().GetInt(CfgMarkKey.Value, 0) != 1) return true;   // 只管本工具件
+                s_noDrop++;
+                return false;
+            }
         }
 
         // ====================================================================
@@ -315,6 +344,13 @@ namespace XiBpBuilder
             // 解冻 → 真实 UpdateSupport 跑起来
             s_freezeWear = false;
             Log.LogInfo("解冻磨损，进入真实模拟观察");
+            if (CfgObserveMin.Value > 0f)
+            {
+                // 解冻同一帧开观测（协程到第一个 yield 前同步执行 → 快照在第一轮原版承重之前）：晚了既漏计数、也拦不住掉落
+                float r = 0.5f * Mathf.Sqrt(Mathf.Pow(pieces.Max(p => p.x) - pieces.Min(p => p.x), 2f)
+                                           + Mathf.Pow(pieces.Max(p => p.z) - pieces.Min(p => p.z), 2f)) + 5f;
+                yield return StartCoroutine(ObserveTask(CfgObserveMin.Value * 60f, Mathf.Max(2f, CfgObserveEvery.Value), r));
+            }
 
             // 段7 Save
             yield return new WaitForSeconds(3f);   // REF: 让实例化稳定
@@ -464,7 +500,7 @@ namespace XiBpBuilder
         // ====================================================================
         internal static bool s_terrainShaped;
         private static readonly List<TerrainOpPiece> s_terrainOps = new List<TerrainOpPiece>();
-        private struct TerrainOpPiece { public GameObject prefab; public Vector3 pos; public Quaternion rot; }
+        private struct TerrainOpPiece { public GameObject prefab; public Vector3 pos; }
 
         private IEnumerator TerrainTask(List<Piece> pieces)
         {
@@ -512,25 +548,45 @@ namespace XiBpBuilder
             catch (Exception e) { Log.LogError($"[地形] ★ 写入异常（可能已部分写入，不写 terrain_done，重跑会重算）：{e}"); yield break; }
             yield return StartCoroutine(WaitRegen(writes.Select(w => w.hm).ToList()));
 
-            int vops = 0;
-            if (s_terrainOps.Count > 0)
+            // 承重预演 → 接地修补（最多 3 轮）：删掉插件后会塌的最底层件，脚下地面整到件底
+            var extra = new Dictionary<long, float>();
+            var doomed = new HashSet<WearNTear>();
+            for (int round = 1; ; round++)
             {
-                // 原版锄头件要在上面那次重算之后再做：原版 LevelTerrain 读的是 heightmap 当前高度
-                foreach (var t in s_terrainOps)
+                yield return new WaitForFixedUpdate();                 // 新地形碰撞体进物理场景
+                yield return StartCoroutine(SolveSupport(plan.boxes, doomed));
+                if (!CfgGroundFix.Value || doomed.Count == 0 || round > 3) break;
+                int added = AddGroundTargets(plan, doomed, extra);
+                Log.LogInfo($"[接地] 第 {round} 轮：{doomed.Count} 件撑不住 → 新增接地顶点 {added}（累计 {extra.Count}）");
+                if (added == 0) break;
+                TerrainPlan p2;
+                List<TcWrite> w2;
+                try
                 {
-                    if (ApplyVanillaTerrainOp(t, plan)) vops++;
-                    if (vops % 20 == 19) yield return null;
+                    p2 = BuildTerrainPlan(pieces, extra, plan.before);
+                    if (p2 == null) break;
+                    w2 = PlanWrites(p2, limit);
                 }
-                Log.LogInfo($"[地形] 原版地形件（锄头整地/路面）执行 {vops}/{s_terrainOps.Count} 个");
-                yield return StartCoroutine(WaitRegen(null));
+                catch (Exception e) { Log.LogError($"[接地] ★ 重算方案异常，放弃修补：{e}"); break; }
+                if (p2.protHard > 0 || p2.over > 0)
+                {
+                    Log.LogWarning($"[接地] 第 {round} 轮方案越界（保护圈 {p2.protHard} / 超 ±{limit:F0}m {p2.over}），放弃本轮修补");
+                    break;
+                }
+                try { CommitWrites(w2); }
+                catch (Exception e) { Log.LogError($"[接地] ★ 写入异常（可能已部分写入，不写 terrain_done）：{e}"); yield break; }
+                yield return StartCoroutine(WaitRegen(w2.Select(w => w.hm).ToList()));
+                plan = p2;
             }
+            ReportDoomed(doomed);
+
 
             // 验收：满权重顶点的实际高度 vs 目标；占地露缝（地表比该点最低件底低 >0.15m）
             var after = WriteTerrainDump(plan, true);
             var errs = new List<float>();
             foreach (var kv in plan.ops)
             {
-                if (kv.Value.w < 0.999f || plan.vanillaTouched.Contains(kv.Key)) continue;
+                if (kv.Value.w < 0.999f) continue;
                 if (after.TryGetValue(kv.Key, out float h)) errs.Add(Mathf.Abs(h - kv.Value.a));
             }
             errs.Sort();
@@ -540,8 +596,7 @@ namespace XiBpBuilder
             int gaps = 0, footN = 0;
             foreach (var kv in plan.minBottom)
             {
-                if (plan.vanillaTouched.Contains(kv.Key) || !plan.role.TryGetValue(kv.Key, out char rr) || rr == 'E'
-                    || !after.TryGetValue(kv.Key, out float h)) continue;
+                if (!plan.role.TryGetValue(kv.Key, out char rr) || rr == 'E' || !after.TryGetValue(kv.Key, out float h)) continue;
                 footN++;
                 if (h < kv.Value - 0.15f) gaps++;
             }
@@ -607,7 +662,7 @@ namespace XiBpBuilder
                 // 原版地形件（锄头整地 mud_road / 路面 paved_road…）不是建筑：建成 ZDO 会被反复实例化、反复改地形。
                 // 按原版做法当「地形操作」在地形段执行（PlanBuild 放置蓝图时也是直接实例化让 TerrainOp 自己跑）
                 var top = TerrainOpPrefab(pc.hash, pc.name);
-                if (top != null) { s_terrainOps.Add(new TerrainOpPiece { prefab = top, pos = world, rot = s_yaw * pc.rot }); continue; }
+                if (top != null) { s_terrainOps.Add(new TerrainOpPiece { prefab = top, pos = world }); continue; }
                 if (CreatePiece(pc, world)) { created++; } else { fail++; }
 
                 if (++batch % (int)CfgBatchSize.Value == 0)
@@ -845,7 +900,7 @@ namespace XiBpBuilder
             {
                 Vector3 world = ToWorld(pc.x, pc.y + CfgYOffset.Value, pc.z, groundBase);
                 var top = TerrainOpPrefab(pc.hash, pc.name);    // 原版地形件本来就不留 ZDO，不算缺失（terrain_done 缺时交给地形段重做）
-                if (top != null) { s_terrainOps.Add(new TerrainOpPiece { prefab = top, pos = world, rot = s_yaw * pc.rot }); continue; }
+                if (top != null) { s_terrainOps.Add(new TerrainOpPiece { prefab = top, pos = world }); continue; }
                 if (!Present(have, pc.hash, world))
                 {
                     miss++;
@@ -890,6 +945,87 @@ namespace XiBpBuilder
         {
             yield return StartCoroutine(inner);
             after();
+        }
+
+        // 承重观测：件数时序（塌了 ZDO 就少）+ 游戏锤子同款承重色（WearNTear.GetSupportColorValue：−1 蓝 = 满支撑，
+        // 0..1 = 红→绿）+ 支撑不足（HaveSupport=false：下一次原版磨损更新就会整件销毁）
+        private static readonly MethodInfo MiColor = AccessTools.Method(typeof(WearNTear), "GetSupportColorValue");
+        private static readonly MethodInfo MiHave  = AccessTools.Method(typeof(WearNTear), "HaveSupport");
+        private IEnumerator ObserveTask(float seconds, float every, float radius)
+        {
+            if (MiColor == null || MiHave == null)
+            {
+                Log.LogError("[观测] ★ 反射取不到 WearNTear.GetSupportColorValue / HaveSupport——观测输出不可信，跳过");
+                yield break;
+            }
+            if (CfgSupportOn.Value)
+                Log.LogWarning("[观测] ⚠ [Support] Enabled=true：本工具件的支撑被锁在最大值，观测不到真实承重（验承重请设 false）");
+            // 开始时记下每个本工具件（ZDOID → prefab、位置）：结束时没了 = 塌/损，位置变了 = 被挪动（推车、物理物件）
+            var start = new Dictionary<ZDOID, KeyValuePair<int, Vector3>>();
+            foreach (var z in EnumAllZDO())
+                if (z.GetInt(CfgMarkKey.Value, 0) == 1 && Dist2D(z.GetPosition(), CfgOriginX.Value, CfgOriginZ.Value) <= radius)
+                    start[z.m_uid] = new KeyValuePair<int, Vector3>(z.GetPrefab(), z.GetPosition());
+            int n0 = start.Count, last = n0;
+            float t0 = Time.time;
+            s_observing = true; s_noDrop = 0;
+            Log.LogInfo($"[观测] 开始：{seconds:F0}s，每 {every:F0}s 一次；落点 {radius:F0}m 内本工具件 {n0}（支撑锁 {(CfgSupportOn.Value ? "开" : "关")}）");
+            while (Time.time - t0 < seconds)
+            {
+                yield return new WaitForSeconds(every);
+                int n = CountOurZdos(radius), inst = 0, blue = 0, green = 0, yellow = 0, red = 0, starved = 0;
+                foreach (var w in CollectOurPieces())
+                {
+                    if (Dist2D(w.transform.position, CfgOriginX.Value, CfgOriginZ.Value) > radius) continue;
+                    inst++;
+                    float v = Convert.ToSingle(MiColor.Invoke(w, null));
+                    if (v < 0f) blue++; else if (v >= 0.6f) green++; else if (v >= 0.3f) yellow++; else red++;
+                    if (!(bool)MiHave.Invoke(w, null)) starved++;
+                }
+                Log.LogInfo($"[观测] t={Time.time - t0:F0}s 件 {n}（较开始 {n - n0:+0;-0;0}）| 实例 {inst} | "
+                    + $"蓝 {blue} 绿 {green} 黄 {yellow} 红 {red} | 支撑不足 {starved}");
+                last = n;
+            }
+            s_observing = false;
+            var lostBy = new Dictionary<string, int>();
+            var lostY = new List<float>();
+            // 逐件明细：蓝图坐标（ToWorld 的逆）+ 世界坐标，离线对回蓝图看它原本靠什么撑
+            var csv = new System.Text.StringBuilder("prefab,mat,px,py,pz,wx,wy,wz\n");
+            var inv = Quaternion.Inverse(s_yaw);
+            float groundBase = s_platformY - CfgGroundLayerPy.Value;
+            int moved = 0;
+            foreach (var kv in start)
+            {
+                var z = ZDOMan.instance.GetZDO(kv.Key);
+                if (z == null)
+                {
+                    var pf = ZNetScene.instance.GetPrefab(kv.Value.Key);
+                    string nm = pf ? pf.name : kv.Value.Key.ToString();
+                    var wnt = pf ? pf.GetComponent<WearNTear>() : null;   // 材质：石压木、铁压木这种原版必塌的组合一眼能看出
+                    lostBy[nm] = lostBy.TryGetValue(nm, out int c) ? c + 1 : 1;
+                    lostY.Add(kv.Value.Value.y - s_platformY);
+                    Vector3 wp = kv.Value.Value, d = inv * new Vector3(wp.x - CfgOriginX.Value, 0f, wp.z - CfgOriginZ.Value);
+                    csv.Append(string.Format(CultureInfo.InvariantCulture, "{0},{1},{2:F3},{3:F3},{4:F3},{5:F2},{6:F2},{7:F2}\n",
+                        nm, wnt ? wnt.m_materialType.ToString() : "-", d.x + s_cx, wp.y - groundBase - CfgYOffset.Value, d.z + s_cz, wp.x, wp.y, wp.z));
+                }
+                else if ((z.GetPosition() - kv.Value.Value).magnitude > 0.2f) moved++;
+            }
+            if (lostBy.Count > 0)
+            {
+                lostY.Sort();
+                Log.LogInfo($"[观测] 塌/损件（按 prefab）：{string.Join(", ", lostBy.OrderByDescending(k => k.Value).Take(15).Select(k => k.Key + "×" + k.Value))}"
+                    + $"；相对平台高度 {lostY[0]:+0.0;-0.0}~{lostY[lostY.Count - 1]:+0.0;-0.0}m（中位 {lostY[lostY.Count / 2]:+0.0;-0.0}）");
+            }
+            File.WriteAllText(Path.Combine(Paths.ConfigPath, "bp_observe_lost.csv"), csv.ToString());
+            Log.LogInfo($"[观测] 位置变动 >0.2m 的件 {moved} 个（推车等物理物件，不是塌）；塌件建材掉落已拦 {s_noDrop} 次");
+            Log.LogInfo($"★ [观测] 结束：{seconds:F0}s 内本工具件 {n0} → {last}（"
+                + (last >= n0 ? "一件没塌 ✓" : $"塌/损 {n0 - last} 件 ✗") + "）");
+        }
+        private int CountOurZdos(float radius)
+        {
+            int n = 0;
+            foreach (var z in EnumAllZDO())
+                if (z.GetInt(CfgMarkKey.Value, 0) == 1 && Dist2D(z.GetPosition(), CfgOriginX.Value, CfgOriginZ.Value) <= radius) n++;
+            return n;
         }
 
         private void SupportDiag()
@@ -1006,9 +1142,6 @@ namespace XiBpBuilder
         private static readonly FieldInfo FiLastPt  = AccessTools.Field(typeof(TerrainComp), "m_lastOpPoint");
         private static readonly FieldInfo FiLastR   = AccessTools.Field(typeof(TerrainComp), "m_lastOpRadius");
         private static readonly MethodInfo MiSave   = AccessTools.Method(typeof(TerrainComp), "Save", new[] { typeof(bool) });
-        private static readonly MethodInfo MiDoOp   = AccessTools.Method(typeof(TerrainComp), "DoOperation",
-                                                        new[] { typeof(Vector3), typeof(Vector3), typeof(TerrainOp.Settings) });
-
         private static string TerrainReflectionMissing()
         {
             string[] names = { "Heightmap.m_heights", "TerrainComp.m_levelDelta", "TerrainComp.m_smoothDelta",
@@ -1021,19 +1154,20 @@ namespace XiBpBuilder
         }
 
         private struct VOp { public float a, w; }      // 复合后的「目标高度 a、权重 w」：h' = h + w(a − h)
-        private class PBox { public string name; public float pivotY; public Bounds b; public bool floor; }
+        private class PBox { public string name; public float pivotY; public Bounds b; public bool floor; public WearNTear w; }
         private class TerrainPlan
         {
             public readonly Dictionary<long, VOp> ops = new Dictionary<long, VOp>();
-            public readonly Dictionary<long, char> role = new Dictionary<long, char>();   // P 占地 / B 地窖 / S 过渡带 / E #Terrain
+            public readonly Dictionary<long, char> role = new Dictionary<long, char>();   // P 占地 / B 地窖 / V 锄头件采样 / G 接地修补 / S 过渡带 / E #Terrain
             public readonly Dictionary<long, string> paint = new Dictionary<long, string>();
             public readonly Dictionary<long, float> before = new Dictionary<long, float>();
             public readonly Dictionary<long, float> minBottom = new Dictionary<long, float>();   // 占地顶点上最低件底（验收露缝用）
-            public readonly HashSet<long> vanillaTouched = new HashSet<long>();
+            public readonly HashSet<long> sampled = new HashSet<long>();          // 作者地面采样（锄头件）进平台的顶点：dump 记 V
+            public readonly HashSet<long> grounded = new HashSet<long>();         // 接地修补的顶点：dump 记 G
             public readonly HashSet<long> protect = new HashSet<long>();         // 本该改、因在保护圈内而跳过的顶点（dump 记 X，独立复核没动）
             public List<PBox> boxes;
             public float padY, skirt;
-            public int nFoot, nDig, nSkirt, nFilled, nEntries, nEntryVerts, protHard, protSoft, over, clampedSoft;
+            public int nFoot, nDig, nSkirt, nFilled, nEntries, nEntryVerts, nSampled, nLifted, protHard, protSoft, over, clampedSoft;
             public string overSample = "";
         }
         private static long VKey(int x, int z) => ((long)x << 32) | (uint)z;
@@ -1053,6 +1187,123 @@ namespace XiBpBuilder
             }
             else p.ops[k] = new VOp { a = a, w = w };
             p.role[k] = role;
+        }
+
+        // ====================================================================
+        //  承重预演：磨损冻结中、支撑锁放行，对本工具件跑原版 UpdateSupport 到收敛——= 删掉插件后玩家走近时，
+        //  每件从满支撑（WearNTear.Awake）往下衰减到的值。撑不住的关掉碰撞体（= 原版塌掉、不再给别人当支点）
+        //  再算，直到不再新增。只算不毁：结束后碰撞体恢复、支撑回满（锁接着锁）
+        // ====================================================================
+        private static readonly MethodInfo MiUpdSup = AccessTools.Method(typeof(WearNTear), "UpdateSupport");
+        private static readonly MethodInfo MiClrSup = AccessTools.Method(typeof(WearNTear), "ClearCachedSupport");
+        private static readonly MethodInfo MiMaxSup = AccessTools.Method(typeof(WearNTear), "GetMaxSupport");
+        private static readonly MethodInfo MiMinSup = AccessTools.Method(typeof(WearNTear), "GetMinSupport");
+        private static bool s_solving;
+
+        private IEnumerator SolveSupport(List<PBox> boxes, HashSet<WearNTear> doomed)
+        {
+            doomed.Clear();
+            if (MiUpdSup == null || MiClrSup == null || MiMaxSup == null || MiMinSup == null)
+            {
+                Log.LogError("[承重预演] ★ 反射取不到 WearNTear.UpdateSupport / ClearCachedSupport / GetMaxSupport / GetMinSupport——跳过");
+                yield break;
+            }
+            var refSup = AccessTools.FieldRefAccess<WearNTear, float>("m_support");
+            var ws = boxes.Select(q => q.w).Where(w => w != null).Distinct().ToList();
+            var mx = ws.ToDictionary(w => w, w => Convert.ToSingle(MiMaxSup.Invoke(w, null)));
+            var off = new List<Collider>();
+            int pass = 0, rounds = 0;
+            s_solving = true;
+            try
+            {
+                foreach (var w in ws) { refSup(w) = mx[w]; MiClrSup.Invoke(w, null); }
+                while (true)
+                {
+                    float change;
+                    do
+                    {
+                        change = 0f;
+                        foreach (var w in ws)
+                        {
+                            if (!w || doomed.Contains(w)) continue;
+                            float s0 = refSup(w);
+                            MiUpdSup.Invoke(w, null);
+                            change = Mathf.Max(change, Mathf.Abs(refSup(w) - s0) / mx[w]);
+                        }
+                        if (++pass % 4 == 0) yield return null;
+                    } while (change > 1e-3f && pass < 400);
+                    int fresh = 0;
+                    foreach (var w in ws)
+                    {
+                        if (!w || doomed.Contains(w) || refSup(w) >= Convert.ToSingle(MiMinSup.Invoke(w, null))) continue;
+                        doomed.Add(w);
+                        fresh++;
+                        foreach (var c in w.GetComponentsInChildren<Collider>())
+                            if (c.enabled) { c.enabled = false; off.Add(c); }
+                    }
+                    rounds++;
+                    if (fresh == 0 || pass >= 400) break;
+                    Physics.SyncTransforms();
+                    foreach (var w in ws) if (w && !doomed.Contains(w)) MiClrSup.Invoke(w, null);   // 缓存里还挂着刚塌的件
+                }
+            }
+            finally
+            {
+                foreach (var c in off) if (c) c.enabled = true;
+                foreach (var w in ws) if (w) { refSup(w) = mx[w]; MiClrSup.Invoke(w, null); }
+                s_solving = false;
+                Physics.SyncTransforms();
+            }
+            Log.LogInfo($"[承重预演] {pass} 遍 / {rounds} 轮{(pass >= 400 ? "（未完全收敛）" : "收敛")}：{ws.Count} 件中原版撑不住 {doomed.Count} 件");
+        }
+
+        // 接地修补：撑不住的件里最底层的（正下方没有别的撑不住的件）→ 脚下地面整到件底 + Embed。原版只认「碰到地表」
+        // 才算接地，整块埋在土里也不算——所以埋住的挖出来（≤ GroundFixMax）、悬空的垫起来（> Cap 只给包围盒高 ≥ 1.5m 的
+        // 柱 / 墙 / 桩，扁平的屋顶、梁、地板底下不堆土柱）。不动：房子地板下（P/B）、蓝图 #Terrain（E）、保护圈；
+        // 不埋、不掏空还站得住的件
+        private int AddGroundTargets(TerrainPlan plan, HashSet<WearNTear> doomed, Dictionary<long, float> extra)
+        {
+            var dead = plan.boxes.Where(q => q.w != null && doomed.Contains(q.w)).ToList();
+            var alive = plan.boxes.Where(q => q.w != null && !doomed.Contains(q.w)).ToList();
+            int added = 0;
+            foreach (var q in dead)
+            {
+                if (dead.Any(o => o != q && o.b.max.y <= q.b.min.y + 0.05f && Overlap2D(o.b, q.b))) continue;   // 不是最底层
+                float t = q.b.min.y + CfgEmbed.Value;
+                bool tall = q.b.size.y >= 1.5f;
+                int x0 = Mathf.CeilToInt(q.b.min.x), x1 = Mathf.FloorToInt(q.b.max.x);
+                int z0 = Mathf.CeilToInt(q.b.min.z), z1 = Mathf.FloorToInt(q.b.max.z);
+                if (x0 > x1) x0 = x1 = Mathf.RoundToInt(q.b.center.x);   // 细柱子：包围盒里可能一个整数顶点都没有
+                if (z0 > z1) z0 = z1 = Mathf.RoundToInt(q.b.center.z);
+                for (int x = x0; x <= x1; x++)
+                for (int z = z0; z <= z1; z++)
+                {
+                    long k = VKey(x, z);
+                    if (plan.role.TryGetValue(k, out char r) && (r == 'P' || r == 'B' || r == 'E')) continue;
+                    if (InProtectCircle(new Vector3(x, 0f, z)) || !Heightmap.GetHeight(new Vector3(x, 0f, z), out float h)) continue;
+                    if (h >= q.b.min.y - 0.1f && h <= q.b.max.y + 0.1f) continue;      // 地表已经穿过它：不是这里的问题
+                    if (t < h ? h - t > CfgGroundFixMax.Value : t - h > (tall ? CfgGroundFixMax.Value : CfgCap.Value)) continue;
+                    float orig = plan.before.TryGetValue(k, out float ob) ? ob : h;
+                    if (Mathf.Abs(t - orig) > Mathf.Min(CfgMaxDelta.Value, Heightmap.c_LevelMaxDelta) - 0.5f) continue;   // 游戏硬限 ±8m（相对原始地形）
+                    bool hurt = alive.Any(o => x >= o.b.min.x - 0.5f && x <= o.b.max.x + 0.5f && z >= o.b.min.z - 0.5f && z <= o.b.max.z + 0.5f
+                        && (t > h ? o.b.min.y < t - 0.2f && o.b.max.y > h                  // 垫土会埋进它
+                                  : o.b.min.y <= h + 0.15f && o.b.max.y >= h - 0.15f && t < o.b.min.y - 0.1f));   // 它正踩着地表：挖了就悬空
+                    if (hurt) continue;
+                    if (!extra.TryGetValue(k, out float e) || t < e) { extra[k] = t; added++; }
+                }
+            }
+            return added;
+        }
+        private static bool Overlap2D(Bounds a, Bounds b) =>
+            a.min.x < b.max.x && b.min.x < a.max.x && a.min.z < b.max.z && b.min.z < a.max.z;
+
+        private void ReportDoomed(HashSet<WearNTear> doomed)
+        {
+            if (doomed.Count == 0) { Log.LogInfo("★ [承重预演] 删掉插件后预计一件不塌 ✓"); return; }
+            var by = doomed.Where(w => w).GroupBy(w => w.gameObject.name.Replace("(Clone)", ""))
+                           .OrderByDescending(g => g.Count()).Take(15).Select(g => g.Key + "×" + g.Count());
+            Log.LogWarning($"★ [承重预演] 删掉插件后预计会塌 {doomed.Count} 件（原版承重撑不住，接地修补也够不着）：{string.Join(", ", by)}"
+                + "——承重观测（observe）会真塌给你看");
         }
 
         // 本工具件（mark==1）在蓝图范围内的实测碰撞体。issue #8/#16 的「无碰撞体」多数是碰撞体挂在子物体上 → 取整棵子树
@@ -1077,16 +1328,18 @@ namespace XiBpBuilder
                 }
                 if (!any) { noCollider++; continue; }
                 string name = w.gameObject.name.Replace("(Clone)", "");
-                list.Add(new PBox { name = name, pivotY = p.y, b = b,
+                list.Add(new PBox { name = name, pivotY = p.y, b = b, w = w,
                                     floor = name.IndexOf("floor", StringComparison.OrdinalIgnoreCase) >= 0 });
             }
             return list;
         }
 
-        private TerrainPlan BuildTerrainPlan(List<Piece> pieces)
+        // extra / orig：接地修补重算时传入（新增硬目标 / 第一轮记下的原始地形——整份方案都按原始地形算，不叠加上一轮）
+        private TerrainPlan BuildTerrainPlan(List<Piece> pieces, Dictionary<long, float> extra = null, Dictionary<long, float> orig = null)
         {
             float bx0 = pieces.Min(p => p.x), bx1 = pieces.Max(p => p.x), bz0 = pieces.Min(p => p.z), bz1 = pieces.Max(p => p.z);
             var plan = new TerrainPlan { boxes = MeasureOurPieces(0.5f * Mathf.Sqrt((bx1 - bx0) * (bx1 - bx0) + (bz1 - bz0) * (bz1 - bz0)), out int noCol) };
+            if (orig != null) foreach (var kv in orig) plan.before[kv.Key] = kv.Value;
             var ground = plan.boxes.Where(q => Mathf.Abs(q.pivotY - s_platformY) <= CfgLayerTol.Value)
                                    .Select(q => q.b.min.y).OrderBy(y => y).ToList();
             Log.LogInfo($"[地形] 开始：实测本工具件碰撞体 {plan.boxes.Count} 个（无碰撞体 {noCol}），地面层 {ground.Count} 个");
@@ -1121,9 +1374,61 @@ namespace XiBpBuilder
             }
             if (foot.Count == 0) { Log.LogError("[地形] ★ 占地为空（贴地件全被 Cap 排除?）——本段放弃"); return null; }
 
+            // ①b 原版地形件（锄头 / 耕地件）= 作者当年地面的采样点（锄头点在哪、地面就在哪）。原版「整地」其实是
+            //    向操作点高度平滑、每顶点累计最多 ±1m：换一块地重放还原不出作者那片地（longhouse 木桩墙下 3–5m 的土坡
+            //    就这么没了、整排塌）。改为逐点整到采样高度：R 内反距离² 插值（最近的采样点主导），离某采样点「原版平滑
+            //    权重」1−(d/R)³ ≥ 0.5 的核心进平台硬目标（与占地取高：不会把地基底下挖空），外圈交给过渡带羽化
+            var sNum = new Dictionary<long, float>();
+            var sDen = new Dictionary<long, float>();
+            var sMax = new Dictionary<long, float>();
+            foreach (var t in s_terrainOps)
+            {
+                var st = t.prefab.GetComponent<TerrainOp>().m_settings;
+                float R = Mathf.Max(1f, st.GetRadius()), y = t.pos.y + st.m_levelOffset + (st.m_raise ? st.m_raiseDelta : 0f);
+                string pn = st.m_paintCleared ? st.m_paintType.ToString() : "";
+                int n = Mathf.CeilToInt(R), cx = Mathf.RoundToInt(t.pos.x), cz = Mathf.RoundToInt(t.pos.z);
+                for (int x = cx - n; x <= cx + n; x++)
+                for (int z = cz - n; z <= cz + n; z++)
+                {
+                    float d = Mathf.Sqrt((x - t.pos.x) * (x - t.pos.x) + (z - t.pos.z) * (z - t.pos.z));
+                    if (d > R) continue;
+                    long k = VKey(x, z);
+                    float q = d / R, w = 1f - q * q * q, iw = 1f / (d * d + 0.05f);
+                    sNum[k] = (sNum.TryGetValue(k, out float a) ? a : 0f) + iw * y;
+                    sDen[k] = (sDen.TryGetValue(k, out float b) ? b : 0f) + iw;
+                    if (!sMax.TryGetValue(k, out float m) || w > m) sMax[k] = w;
+                    if (pn.Length > 0 && d <= st.m_paintRadius) plan.paint[k] = pn;
+                }
+            }
+            var sampleT = new Dictionary<long, float>();
+            foreach (var kv in sMax)
+                if (kv.Value >= 0.5f && !InProtectCircle(new Vector3(KX(kv.Key), 0f, KZ(kv.Key))))
+                    sampleT[kv.Key] = sNum[kv.Key] / sDen[kv.Key];
+            // 采样面上方 Cap 内的件底（作者地上的木桩墙、台阶、柱脚）→ 垫到件底+Embed：碰到地面原版才算接地。
+            // 按该顶点上「最低」的件判（同平台规则）：逐件都垫会把下层的门框 / 柱脚整块埋进土里——埋住的件原版不算接地
+            var lowest = new Dictionary<long, float>();
+            foreach (var q in plan.boxes)
+            {
+                int x0 = Mathf.CeilToInt(q.b.min.x - CfgPad.Value), x1 = Mathf.FloorToInt(q.b.max.x + CfgPad.Value);
+                int z0 = Mathf.CeilToInt(q.b.min.z - CfgPad.Value), z1 = Mathf.FloorToInt(q.b.max.z + CfgPad.Value);
+                for (int x = x0; x <= x1; x++)
+                for (int z = z0; z <= z1; z++)
+                {
+                    long k = VKey(x, z);
+                    if (sampleT.ContainsKey(k) && (!lowest.TryGetValue(k, out float lo) || q.b.min.y < lo)) lowest[k] = q.b.min.y;
+                }
+            }
+            int lifted = 0;
+            foreach (var kv in lowest)
+            {
+                float vt = sampleT[kv.Key];
+                if (kv.Value > vt && kv.Value <= vt + CfgCap.Value && kv.Value + embed > vt) { sampleT[kv.Key] = kv.Value + embed; lifted++; }
+            }
+            plan.nLifted = lifted;
+
             // ② 平台 H = 占地 F 的闭运算（先膨胀 Close 再腐蚀 Close）：贴地件之间的空隙也整平到 PadY
             int gx0 = int.MaxValue, gx1 = int.MinValue, gz0 = int.MaxValue, gz1 = int.MinValue;
-            foreach (var k in foot.Keys)
+            foreach (var k in foot.Keys.Concat(sampleT.Keys).Concat(extra != null ? extra.Keys : Enumerable.Empty<long>()))
             {
                 int x = KX(k), z = KZ(k);
                 if (x < gx0) gx0 = x; if (x > gx1) gx1 = x; if (z < gz0) gz0 = z; if (z > gz1) gz1 = z;
@@ -1155,8 +1460,21 @@ namespace XiBpBuilder
                         && !InProtectCircle(new Vector3(gx0 + i / nz, 0f, gz0 + i % nz)))   // 填补不进保护圈（圈伸进建筑凹口时）
                     { hard[i] = padY; filled++; }
                 plan.nFilled = filled;
-                for (int i = 0; i < dist.Length; i++) dist[i] = float.IsNaN(hard[i]) ? float.MaxValue : 0f;
             }
+            foreach (var kv in sampleT)
+            {
+                int i = (KX(kv.Key) - gx0) * nz + (KZ(kv.Key) - gz0);
+                hard[i] = float.IsNaN(hard[i]) ? kv.Value : Mathf.Max(hard[i], kv.Value);
+                plan.sampled.Add(kv.Key);
+            }
+            plan.nSampled = sampleT.Count;
+            if (extra != null)
+                foreach (var kv in extra)
+                {
+                    hard[(KX(kv.Key) - gx0) * nz + (KZ(kv.Key) - gz0)] = kv.Value;
+                    plan.grounded.Add(kv.Key);
+                }
+            for (int i = 0; i < dist.Length; i++) dist[i] = float.IsNaN(hard[i]) ? float.MaxValue : 0f;
             for (int i = 0; i < dist.Length; i++) if (!float.IsNaN(hard[i])) nearT[i] = hard[i];
 
             // 过渡带宽度：按平台边界上「目标 − 现地形」的最大高差 Δ 自适应（smoothstep 最陡处坡度 = 1.5·Δ/D）
@@ -1167,13 +1485,15 @@ namespace XiBpBuilder
                 int i = ix * nz + iz;
                 if (float.IsNaN(hard[i])) continue;
                 if (!float.IsNaN(hard[i + nz]) && !float.IsNaN(hard[i - nz]) && !float.IsNaN(hard[i + 1]) && !float.IsNaN(hard[i - 1])) continue;
-                if (Heightmap.GetHeight(new Vector3(gx0 + ix, 0f, gz0 + iz), out float h0)) edgeD = Mathf.Max(edgeD, Mathf.Abs(hard[i] - h0));
+                if (plan.before.TryGetValue(VKey(gx0 + ix, gz0 + iz), out float h0) || Heightmap.GetHeight(new Vector3(gx0 + ix, 0f, gz0 + iz), out h0))
+                    edgeD = Mathf.Max(edgeD, Mathf.Abs(hard[i] - h0));
             }
             float skirt = plan.skirt = Mathf.Clamp(1.5f * edgeD / Mathf.Tan(Mathf.Clamp(CfgSkirtSlope.Value, 5f, 80f) * Mathf.Deg2Rad),
                                                    CfgSkirt.Value, skirtMax);
-            Log.LogInfo($"[地形] 平台 = 占地 {foot.Count} + 闭运算填补 {plan.nFilled} 个顶点；边界最大高差 {edgeD:F2}m → "
+            Log.LogInfo($"[地形] 平台 = 占地 {foot.Count} + 闭运算填补 {plan.nFilled} + 锄头件采样 {plan.nSampled}（{s_terrainOps.Count} 个件，其中 {plan.nLifted} 次垫到件底）个顶点；边界最大高差 {edgeD:F2}m → "
                 + $"过渡带宽 {skirt:F1}m（目标坡度 ≤ {CfgSkirtSlope.Value:F0}°）");
             Chamfer(dist, nearT, nx, nz);
+            SkirtTargets(hard, dist, nearT, nx, nz, skirt);
 
             // ③ 方案：占地 / 地窖满权重；过渡带 smoothstep（两端斜率为 0，不起棱）
             string footPaint = (CfgTerrainPaint.Value ?? "").Trim();
@@ -1190,7 +1510,8 @@ namespace XiBpBuilder
                 if (isHard)
                 {
                     bool isDig = dig.TryGetValue(k, out float dg);
-                    Compose(plan, k, isDig ? dg : hard[i], 1f, isDig ? 'B' : 'P');
+                    Compose(plan, k, isDig ? dg : hard[i], 1f,
+                            isDig ? 'B' : plan.grounded.Contains(k) ? 'G' : plan.sampled.Contains(k) ? 'V' : 'P');
                     if (isDig) plan.nDig++; else plan.nFoot++;
                     if (footPaint.Length > 0) plan.paint[k] = footPaint;
                 }
@@ -1255,6 +1576,43 @@ namespace XiBpBuilder
             if (d <= 0f) return 0f;
             float t = d / 3f;
             return t * t * (3f - 2f * t);
+        }
+
+        // 过渡带目标 = 半径 skirt 内硬目标按 1/d³ 加权（不是「最近那块」）：硬目标高差大时（平台 0m、接地挖出的坑 −7m、
+        // 锄头件采样的土坡 +4m），最近取值在两块的分界线上起直壁（longhouse 实测过渡带 93 处断崖、最高 6m）
+        private static void SkirtTargets(float[] hard, float[] dist, float[] nearT, int nx, int nz, float skirt)
+        {
+            const int B = 4;                                            // 分桶边长（顶点 = m）
+            var buckets = new Dictionary<long, List<int>>();
+            for (int i = 0; i < hard.Length; i++)
+            {
+                if (float.IsNaN(hard[i])) continue;
+                long bk = VKey(i / nz / B, i % nz / B);
+                if (!buckets.TryGetValue(bk, out var l)) buckets[bk] = l = new List<int>();
+                l.Add(i);
+            }
+            int rb = Mathf.CeilToInt(skirt / B) + 1;
+            float r2 = skirt * skirt;
+            for (int i = 0; i < dist.Length; i++)
+            {
+                if (!float.IsNaN(hard[i]) || dist[i] >= skirt) continue;
+                int ix = i / nz, iz = i % nz;
+                float num = 0f, den = 0f;
+                for (int u = ix / B - rb; u <= ix / B + rb; u++)
+                for (int v = iz / B - rb; v <= iz / B + rb; v++)
+                {
+                    if (!buckets.TryGetValue(VKey(u, v), out var l)) continue;
+                    foreach (int j in l)
+                    {
+                        float dx = j / nz - ix, dz = j % nz - iz, d2 = dx * dx + dz * dz;
+                        if (d2 > r2) continue;
+                        float w = 1f / (d2 * Mathf.Sqrt(d2));
+                        num += w * hard[j];
+                        den += w;
+                    }
+                }
+                if (den > 0f) nearT[i] = num / den;
+            }
         }
 
         // 两遍倒角距离变换（1 / √2 权重，与欧氏距离误差 < 8%），同时把最近源点的目标高度一路带过去
@@ -1347,8 +1705,10 @@ namespace XiBpBuilder
                     }
                     int idx = i * (w + 1) + j;                 // 行主序 z*(w+1)+x：#19 实测往返自检确认过
                     float cur = hp.y + heights[idx];
-                    if (!plan.before.ContainsKey(k)) plan.before[k] = cur;
-                    float nl = L[idx] + Sd[idx] + op.w * (op.a - cur);   // 原版 LevelTerrain 同式：smoothDelta 并入后清零
+                    if (!plan.before.TryGetValue(k, out float orig)) plan.before[k] = orig = cur;
+                    // 原版 LevelTerrain 同式（smoothDelta 并入后清零）；目标按原始地形 orig 算——接地修补重算方案时不叠加上一轮
+                    //（第一轮 orig == cur，即 L + Sd + w(a − cur)）
+                    float nl = L[idx] + Sd[idx] + orig + op.w * (op.a - orig) - cur;
                     if (Mathf.Abs(nl) > limit)
                     {
                         if (op.w >= 0.999f) { if (plan.over++ < 5) plan.overSample += $"({KX(k)},{KZ(k)}) 需 {nl:+0.0;-0.0}m "; }
@@ -1445,7 +1805,7 @@ namespace XiBpBuilder
                         foreach (var go in pt.m_pieces)
                             if (go && go.GetComponent<TerrainOp>()) s_opPrefabs[go.name.GetStableHashCode()] = go;
                     }
-                Log.LogInfo($"[地形] 原版地形件 prefab {s_opPrefabs.Count} 个：{string.Join(", ", s_opPrefabs.Values.Select(g => g.name).OrderBy(n => n))}");
+                Log.LogInfo($"[地形] 原版地形件 prefab {s_opPrefabs.Count} 个：{string.Join(", ", s_opPrefabs.Values.Select(OpDesc).OrderBy(n => n))}");
             }
             if (s_opPrefabs.TryGetValue(hash, out var hit)) return hit;
             // 旧名 → 现行 _v2（BuildShare 老蓝图记的是 mud_road / path / paved_road / raise）
@@ -1454,28 +1814,14 @@ namespace XiBpBuilder
             return zp && zp.GetComponent<TerrainOp>() ? zp : null;
         }
 
-        // = 原版 TerrainComp.RPC_ApplyOperation 里 owner 做的那一步（TerrainOp.Awake → ApplyOperation → RPC → DoOperation）
-        private bool ApplyVanillaTerrainOp(TerrainOpPiece t, TerrainPlan plan)
+        private static string OpDesc(GameObject g)
         {
-            var op = t.prefab.GetComponent<TerrainOp>();
-            if (op == null || MiDoOp == null) return false;
-            float r = op.m_settings.GetRadius();
-            if (Dist2D(t.pos, CfgProtectX.Value, CfgProtectZ.Value) < CfgProtectR.Value + r) return false;   // 保护圈一点不碰
-            var hms = new List<Heightmap>();
-            Heightmap.FindHeightmap(t.pos, r + 1f, hms);
-            foreach (var hm in hms)
-            {
-                if (hm == null || hm.IsDistantLod) continue;
-                var tc = hm.GetAndCreateTerrainCompiler();
-                if (tc == null) continue;
-                tc.GetComponent<ZNetView>()?.ClaimOwnership();
-                MiDoOp.Invoke(tc, new object[] { t.pos, t.rot.eulerAngles, op.m_settings });
-            }
-            int R = Mathf.CeilToInt(r) + 1, px = Mathf.RoundToInt(t.pos.x), pz = Mathf.RoundToInt(t.pos.z);
-            for (int dx = -R; dx <= R; dx++)
-            for (int dz = -R; dz <= R; dz++)
-                plan.vanillaTouched.Add(VKey(px + dx, pz + dz));      // 这些顶点归原版操作管，不计入验收误差
-            return true;
+            var st = g.GetComponent<TerrainOp>().m_settings;
+            return g.name + "(" + string.Join(" ", new[] {
+                st.m_level ? $"整平r{st.m_levelRadius:F1}" + (st.m_levelOffset != 0f ? $"{st.m_levelOffset:+0.00;-0.00}" : "") : null,
+                st.m_raise ? $"抬r{st.m_raiseRadius:F1}Δ{st.m_raiseDelta:F2}" : null,
+                st.m_smooth ? $"平滑r{st.m_smoothRadius:F1}" : null,
+                st.m_square ? "方" : null }.Where(x => x != null)) + ")";
         }
 
         // 逐顶点 dump（首行 # 元数据）→ tools/bp_terrain_report.py 出坡度 / 误差 / 保护圈报告
@@ -1491,8 +1837,7 @@ namespace XiBpBuilder
             foreach (var kv in plan.ops)
             {
                 int x = KX(kv.Key), z = KZ(kv.Key);
-                // V = 原版地形件（作者的锄头整地/路面）后来又改过的顶点：最终形状归作者，不按本工具的目标验收
-                char role = plan.vanillaTouched.Contains(kv.Key) ? 'V' : plan.role[kv.Key];
+                char role = plan.role[kv.Key];   // P 占地 / B 地窖 / V 锄头件采样 / G 接地修补 / S 过渡带 / E #Terrain
                 sb.Append(x).Append(',').Append(z).Append(',').Append(role).Append(',')
                   .Append(F3(kv.Value.w)).Append(',').Append(F3(kv.Value.a)).Append(',')
                   .Append(plan.before.TryGetValue(kv.Key, out float b) ? F3(b) : "").Append(',')

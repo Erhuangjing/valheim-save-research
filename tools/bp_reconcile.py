@@ -256,14 +256,13 @@ def reconcile(expected, found_records, margin=15.0, ignore_y=False):
     found = collections.Counter(key_of(h, x, y, z, use_y=not ignore_y) for h, x, y, z in found_records)
 
     matched = missing = 0
-    missing_list = []
+    miss = {}
     for k, cnt in exp.items():
         m = min(cnt, found.get(k, 0))
         matched += m
         if cnt > m:
             missing += cnt - m
-            missing_list.append({'name': name_of[k], 'key': list(k), 'count': cnt - m})
-    missing_list.sort(key=lambda d: -d['count'])
+            miss[k] = cnt - m
 
     # extras：只统计期望包围盒 + margin 内的多出记录（盒外是全世界原有物件，不计）
     # issue #20：key 元数随 ignore_y 变（3 元组），反算坐标一律走 key_xyz；ignore_y 时
@@ -283,12 +282,40 @@ def reconcile(expected, found_records, margin=15.0, ignore_y=False):
             continue
         extras[k] = cnt
 
+    # 挪位：同 hash、水平 ≤ 1m、高差 ≤ 3m 的「缺失 ↔ 盒内多出」配对 —— 件还在，只是被游戏挪了
+    #（草 / 蓟 / 灌木等 StaticPhysics 贴到整过的地面、推车滚动）。ignore_y 时只看水平
+    pool = collections.defaultdict(list)
+    for k, cnt in extras.items():
+        x, y, z = key_xyz(k, ignore_y)
+        pool[k[0]].append([x, y, z, cnt])
+    moved = 0
+    moved_by = collections.Counter()
+    missing_list = []
+    for k, c in miss.items():
+        x, y, z = key_xyz(k, ignore_y)
+        for cand in sorted(pool.get(k[0], []), key=lambda q: (q[0] - x) ** 2 + (q[2] - z) ** 2):
+            if c == 0:
+                break
+            if cand[3] == 0 or abs(cand[0] - x) > 1.0 or abs(cand[2] - z) > 1.0 \
+                    or (y is not None and abs(cand[1] - y) > 3.0):
+                continue
+            t = min(c, cand[3])
+            cand[3] -= t
+            c -= t
+            moved += t
+            moved_by[name_of[k]] += t
+        if c:
+            missing_list.append({'name': name_of[k], 'key': list(k), 'count': c})
+    missing_list.sort(key=lambda d: -d['count'])
+
     total = sum(exp.values())
     rate = matched / total if total else 1.0
     return {
         'expected': total, 'matched': matched, 'missing': missing,
         'rate': round(rate, 6),
-        'missing_list': missing_list[:50],
+        'moved': moved, 'moved_by': dict(moved_by.most_common(10)),
+        'rate_moved': round((matched + moved) / total if total else 1.0, 6),
+        'missing_list': missing_list[:50],          # 只列真缺（挪位的不列）
         'extra_in_bbox': {str(list(k)): c for k, c in extras.most_common(20)},
         'extra_in_bbox_total': sum(extras.values()),
         'margin_m': margin,
@@ -296,7 +323,9 @@ def reconcile(expected, found_records, margin=15.0, ignore_y=False):
 
 
 def verdict(res, min_rate):
-    return res['matched'] == res['expected'] or res['rate'] >= min_rate
+    # 挪位的件还在（被游戏贴地 / 滚动），不算丢
+    got = res['matched'] + res.get('moved', 0)
+    return got == res['expected'] or res.get('rate_moved', res['rate']) >= min_rate
 
 
 # ---------------------------------------------------------------- 自检
@@ -412,8 +441,19 @@ def selftest():
            and near(g360[0]['x'], 101.0) and near(g360[0]['z'], 200.0))
     print('G 旋转同插件式 : 90° 东→南 (%.1f,%.1f)、北→东 (%.1f,%.1f)；360° 复原 → %s'
           % (g90[0]['x'], g90[0]['z'], g90[1]['x'], g90[1]['z'], 'PASS' if okG else 'FAIL'))
-    ok = okA and okB and okC and okD and okE and okF and okG
-    print('selftest:', '七案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
+    # H：挪位配对——同件水平 0.5m、下沉 1.5m（植被贴地）算挪位不算丢；水平挪 5m 的仍是缺失 + 多出
+    worldH = os.path.join(tmp, 'WH'); os.makedirs(worldH)
+    recsH = recs_of(exp[2:]) + [(exp[0]['hash'], exp[0]['x'] + 0.5, exp[0]['y'] - 1.5, exp[0]['z']),
+                                (exp[1]['hash'], exp[1]['x'] + 5.0, exp[1]['y'], exp[1]['z'])]
+    _synth_chunk(os.path.join(worldH, '_main.0.chunk'), recsH)
+    foundH, _ = scan_chunks_for_hashes(worldH, {e['hash'] for e in exp})
+    rH = reconcile(exp, foundH)
+    okH = (rH['matched'] == 38 and rH['missing'] == 2 and rH['moved'] == 1 and len(rH['missing_list']) == 1
+           and rH['missing_list'][0]['name'] == exp[1]['name'] and not verdict(rH, 1.0) and verdict(rH, 0.97))
+    print('H 挪位配对     : 匹配 %d 缺失 %d（挪位 %d、真缺 %d 条） → %s'
+          % (rH['matched'], rH['missing'], rH['moved'], len(rH['missing_list']), 'PASS' if okH else 'FAIL'))
+    ok = okA and okB and okC and okD and okE and okF and okG and okH
+    print('selftest:', '八案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
     return 0 if ok else 1
 
 
@@ -490,8 +530,11 @@ def main(argv=None):
 
     print('期望 %d 件 | 扫描命中 hash 记录 %d 条（%d 个 chunk 文件）'
           % (res['expected'], len(found), len(chunk_files)))
-    print('匹配 %d | 缺失 %d | 盒内多出 %d → 存活率 %.2f%%'
-          % (res['matched'], res['missing'], res['extra_in_bbox_total'], res['rate'] * 100))
+    print('匹配 %d | 缺失 %d（其中挪位 %d）| 盒内多出 %d → 存活率 %.2f%%（算上挪位 %.2f%%）'
+          % (res['matched'], res['missing'], res['moved'], res['extra_in_bbox_total'], res['rate'] * 100,
+             res['rate_moved'] * 100))
+    if res['moved']:
+        print('  挪位（件还在，被游戏贴地 / 滚动了）：%s' % ', '.join('%s×%d' % kv for kv in res['moved_by'].items()))
     for m in res['missing_list'][:10]:
         print('  [缺] %-32s ×%d  key=%s' % (m['name'], m['count'], m['key']))
     if res['extra_in_bbox']:

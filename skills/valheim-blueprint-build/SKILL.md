@@ -12,7 +12,7 @@ description: 把 Valheim 蓝图（PlanBuild .blueprint / BuildShare .vbuild / zi
 | 能做 | 不能做 |
 |---|---|
 | `.blueprint` / `.vbuild` / zip / PlanBuild 市场 blob 解析 | 纯离线改存档建整栋（实测证伪，见 `docs/Valheim_蓝图无mod落地_skill可行性调研.md`） |
-| 在用户给的方位附近自动选点，避开保护圈 | 旋转蓝图（按蓝图原朝向落地） |
+| 在用户给的方位附近自动选点，避开保护圈；任意朝向（`--rotation`） | |
 | 游戏内实测地形定落地高度：房子坐在地上，门口够得着 | 地形改动超过游戏硬限 ±8m（直接拒绝，不硬改） |
 | 先整出整块房基 + 自适应缓坡接回原地形 + 地窖开挖 | 保留木牌文字 / 箱子内容等附加数据（件清单只存 name/位置/yaw） |
 | 回放蓝图 `#Terrain`（PlanBuild 语义）与 vbuild 里的原版锄头件 | 斜梁等非纯 yaw 件的倾斜（按 yaw 落地，需目视） |
@@ -25,6 +25,8 @@ description: 把 Valheim 蓝图（PlanBuild .blueprint / BuildShare .vbuild / zi
 1. **蓝图文件**路径。
 2. **大致方位**：坐标 `(x, z)`，或「主宅东边 50 米」。后者要主宅坐标：用户给，或离线扫存档找玩家建筑聚落
    （`bp_reconcile.full_scan` + `bp_autosite.classify(name) == 'structure'` 按 32m 格聚类）。
+   **朝向**：大门朝哪边（`--rotation` 度，俯视顺时针，绕蓝图中心；90 = 原来朝北的一面改朝东）。
+   用户没要求就用 0（蓝图原朝向）；为了塞进保护圈外的空地而转，要先跟用户说明。
 3. **保护圈**：一点都不能碰的区域（主宅 + 护城河 + 田地…）圆心与半径，**宁大勿小**。护城河是地形改动，
    离线扫描看不出来——问用户，或按「建筑外沿 + 护城河宽度」估。
 4. **服务器**：先在**副本世界的测试服**跑通，再上正式服。要：服务器目录、**该服自己的启动脚本**（`--bat`；
@@ -52,7 +54,7 @@ python tools/bp_pipeline.py preflight --bp "$BP" --work $W
 #   风险=high（含地下结构）→ 讲给用户：执行器会把 floor 件底下挖成地窖、深桩直接埋；同意后再继续
 
 # 2 选点：只在用户给的方位附近找，整块（含外扩）不许碰保护圈
-python tools/bp_pipeline.py autosite --work $W --world "$WORLD" \
+python tools/bp_pipeline.py autosite --work $W --world "$WORLD" --rotation <度> \
     --near-x <x> --near-z <z> --near-r 150 \
     --protect-x <px> --protect-z <pz> --protect-r <pr> \
     --max-spread 8 --max-burial 8 --site-margin 8
@@ -65,7 +67,7 @@ python tools/bp_pipeline.py backup --work $W --world "$WORLD" --server "$SRV"
 # 4 部署执行器（地形默认开；只想先看方案加 --terrain-dry-run）
 python tools/bp_pipeline.py install --work $W --server "$SRV" \
     --bepinex-src <BepInExPack 目录> --plugin-dll <XiBpBuilder.dll> \
-    --site-x <x> --site-z <z> --protect-x <px> --protect-z <pz> --protect-r <pr>
+    --site-x <x> --site-z <z> --rotation <度> --protect-x <px> --protect-z <pz> --protect-r <pr>
 
 # 5 起服落地：盯日志 → 编排完成（此时存档已写盘）→ 观察窗 → 自动停服
 python tools/bp_pipeline.py run --work $W --server "$SRV" --bat "$BAT"
@@ -126,6 +128,8 @@ python tools/bp_pipeline.py report --work $W
 执行器照搬 PlanBuild（sirskunkalot/PlanBuild，WTFPL）`TerrainTools.cs` 的写法：只改 TerrainComp 的 level/smooth
 delta 与 paint mask，然后 `ClaimOwnership → Save → Heightmap.Poke(0,false)`，高度 / 碰撞 / 渲染交给游戏自己重算。
 
+0. **朝向**：整栋先绕蓝图包围盒中心转 `Rotation` 度（件的位置与朝向、`#Terrain`、锄头件一起转；
+   `#Terrain` 方形的角度 = 条目角度 + 蓝图角度，同 PlanBuild 放置时的 transform.rotation）。
 1. **落地高度**（件放下前）：地面层 = `|py − GroundLayerPy| ≤ 0.6` 的件；整栋偏移 = 中位数(实测地形 − 件 py)。
    GroundLayerPy 推导：院墙众数 → 原版锄头件中位数（作者当年整出的地表）→ py 直方图最低非孤立档。
 2. **放件**（磨损冻结、支撑锁定，件不会掉）。
@@ -152,7 +156,6 @@ delta 与 paint mask，然后 `ClaimOwnership → Save → Heightmap.Poke(0,fals
 
 - 游戏硬限：地形相对原始高度最多 ±8m。落点太陡只能换，不能硬改。
 - 选点的「起伏」是离线代理估计（存档里没有原始地形高度，地形由种子生成），以执行器的落点起伏检查为准。
-- 蓝图按原朝向落地；需要转 90° 的场景暂不支持。
 - 件清单只存 yaw：斜梁等非纯 yaw 件、木牌文字、箱子内容需人工补。
 - 不开 `[Terrain]` 时仍走旧的锚点整体位移，其测量本身不可信（层掩码缺 terrain、碰撞体只取根节点），
   **建议始终开地形**。

@@ -24,6 +24,7 @@ PlatformY = 样本中位数（round 2 位，供 cfg 直填）。
 """
 import argparse
 import json
+import math
 import os
 import sys
 from collections import defaultdict
@@ -54,6 +55,12 @@ STRUCTURE_PREFIXES = (
 )
 
 BIN = 8.0                  # 样本空间分箱粒度（米）
+
+
+def rotated_extent(w, d, rotation):
+    """w×d 的占地转 rotation 度后的外接矩形（autosite 格子要按转后的占地定）"""
+    c, s = abs(math.cos(math.radians(rotation))), abs(math.sin(math.radians(rotation)))
+    return w * c + d * s, w * s + d * c
 
 
 def classify(name):
@@ -278,6 +285,7 @@ def main(argv=None):
     ap.add_argument('--protect-x', type=float, help='保护圈（主宅 + 护城河）：格子相交即拒')
     ap.add_argument('--protect-z', type=float)
     ap.add_argument('--protect-r', type=float, default=0.0)
+    ap.add_argument('--rotation', type=float, default=0.0, help='蓝图朝向（度）：格子按转后的占地外接矩形')
     ap.add_argument('--top', type=int, default=10)
     ap.add_argument('--json', help='结果 JSON 输出路径')
     ap.add_argument('--selftest', action='store_true')
@@ -294,8 +302,8 @@ def main(argv=None):
             m = json.load(f)
         xs = [p['x'] for p in m['pieces']] or [0]
         zs = [p['z'] for p in m['pieces']] or [0]
-        fw = max(32.0, max(xs) - min(xs))
-        fd = max(32.0, max(zs) - min(zs))
+        fw, fd = rotated_extent(max(xs) - min(xs), max(zs) - min(zs), a.rotation)
+        fw, fd = max(32.0, fw), max(32.0, fd)
     tile_w, tile_d = fw + 2 * a.margin, fd + 2 * a.margin
 
     hslib = _init_name_cache()

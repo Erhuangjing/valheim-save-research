@@ -54,6 +54,7 @@ zone 交界成断层；直写 `m_heights` + 自拼 6 步重建链，zone 重载�
 
 | 规则 | 做法 |
 |---|---|
+| 朝向 | `[Build] Rotation`（度，俯视顺时针 = Unity yaw）：所有「蓝图 → 世界」换算只走 `ToWorld()`——绕包围盒中心转、再平移到落点；件朝向 = yaw × 件自身朝向；`#Terrain` 方形角度 = 条目角度 + Rotation；离线 `bp_reconcile.transform_pieces(rotation=)` 同式 |
 | 落地高度 | 地面层 = \|py − GroundLayerPy\| ≤ LayerTol（**上下都有界**：院墙模式下只设上界会把下层露台/地窖全算进来，整栋抬高 4m）；整栋偏移 = 中位数(实测地形 − 件 py) |
 | 平台高度 PadY | 地面层件碰撞体底面中位数 + Embed |
 | 占地 | 底面在 [PadY − Sink, PadY + Cap] 的件，xz 包围盒外扩 Pad；地表 = clamp(该点最低件底 + Embed, PadY, PadY + Cap)：略高的件垫土接住，略低的（柱脚）直接埋 |

@@ -53,8 +53,11 @@ def load_hashlib():
 
 
 # ---------------------------------------------------------------- 期望侧
-def transform_pieces(manifest, ox, oz, platform_y, ground_py, yoffset, sink, ignore_y=False):
-    """蓝图局部坐标 → 世界坐标（与参考插件 BuildPieces 同式）。返回带 key 的列表。
+def transform_pieces(manifest, ox, oz, platform_y, ground_py, yoffset, sink, ignore_y=False, rotation=0.0):
+    """蓝图局部坐标 → 世界坐标（与参考插件 ToWorld 同式）。返回带 key 的列表。
+
+    rotation（度，俯视顺时针 = Unity yaw）：绕蓝图包围盒中心旋转，与插件 [Build] Rotation 一致：
+    Quaternion.Euler(0,R,0) * (dx,0,dz) = (dx·cosR + dz·sinR, −dx·sinR + dz·cosR)
 
     ignore_y（实测方法论）：位移缺陷会让 y 出 0.25 量化尖刺（+0.25→58 / −0.25→122 /
     −1.25→1127 件），拿 y 匹配会得出错误的存活率。交叉验证时可用 (hash,x,z) 三元组匹配；
@@ -62,11 +65,13 @@ def transform_pieces(manifest, ox, oz, platform_y, ground_py, yoffset, sink, ign
     """
     cx = manifest['bbox_center']['x']
     cz = manifest['bbox_center']['z']
+    c, s = math.cos(math.radians(rotation)), math.sin(math.radians(rotation))
     out = []
     for p in manifest['pieces']:
-        wx = ox + (p['x'] - cx)
+        dx, dz = p['x'] - cx, p['z'] - cz
+        wx = ox + dx * c + dz * s
         wy = (platform_y - ground_py) + p['y'] + yoffset + sink
-        wz = oz + (p['z'] - cz)
+        wz = oz - dx * s + dz * c
         h = p.get('hash') or stable_hash(p['name'])
         out.append({'name': p['name'], 'hash': h, 'x': wx, 'y': wy, 'z': wz,
                     'key': key_of(h, wx, wy, wz, use_y=not ignore_y)})
@@ -396,8 +401,19 @@ def selftest():
              'PASS' if okE else 'FAIL'))
     print('F 忽略y+盒内多余 : 匹配 %d/%d extras=%d（应=2，盒外不计） → %s'
           % (rF['matched'], rF['expected'], rF['extra_in_bbox_total'], 'PASS' if okF else 'FAIL'))
-    ok = okA and okB and okC and okD and okE and okF
-    print('selftest:', '六案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
+    # G：旋转与插件 ToWorld 同式（Unity yaw 俯视顺时针：东 → 南）；转 360° 回到原位
+    mG = {'bbox_center': {'x': 0.0, 'z': 0.0},
+          'pieces': [{'name': 'wood_floor', 'x': 1.0, 'y': 0.0, 'z': 0.0}, {'name': 'wood_floor', 'x': 0.0, 'y': 0.0, 'z': 2.0}]}
+    g90 = transform_pieces(mG, 100.0, 200.0, 40.0, 0.0, 0.0, 0.0, rotation=90.0)
+    g360 = transform_pieces(mG, 100.0, 200.0, 40.0, 0.0, 0.0, 0.0, rotation=360.0)
+    near = lambda a, b: abs(a - b) < 1e-9
+    okG = (near(g90[0]['x'], 100.0) and near(g90[0]['z'], 199.0)       # (+1,0) → (0,−1)：东转到南
+           and near(g90[1]['x'], 102.0) and near(g90[1]['z'], 200.0)   # (0,+2) → (+2,0)：北转到东
+           and near(g360[0]['x'], 101.0) and near(g360[0]['z'], 200.0))
+    print('G 旋转同插件式 : 90° 东→南 (%.1f,%.1f)、北→东 (%.1f,%.1f)；360° 复原 → %s'
+          % (g90[0]['x'], g90[0]['z'], g90[1]['x'], g90[1]['z'], 'PASS' if okG else 'FAIL'))
+    ok = okA and okB and okC and okD and okE and okF and okG
+    print('selftest:', '七案 %s' % ('全部通过 ✓' if ok else '存在失败 ✗'))
     return 0 if ok else 1
 
 
@@ -412,6 +428,7 @@ def main(argv=None):
     ap.add_argument('--ground-py', type=float, help='蓝图地面层 py（cfg GroundLayerPy）')
     ap.add_argument('--yoffset', type=float, default=0.0)
     ap.add_argument('--sink', type=float, default=0.0, help='锚点求解最终整体位移（有符号，下沉为负）')
+    ap.add_argument('--rotation', type=float, default=0.0, help='蓝图朝向（度，俯视顺时针；= cfg [Build] Rotation）')
     ap.add_argument('--min-rate', type=float, default=1.0, help='达标线（默认 1.0 = 零丢失）')
     ap.add_argument('--margin', type=float, default=15.0, help='extras 判定包围盒外扩（米）')
     ap.add_argument('--ignore-y', action='store_true',
@@ -449,7 +466,7 @@ def main(argv=None):
               % (ident['index'], ident['zones']))
 
     exp = transform_pieces(manifest, a.origin_x, a.origin_z, a.platform_y,
-                           a.ground_py, a.yoffset, a.sink, ignore_y=a.ignore_y)
+                           a.ground_py, a.yoffset, a.sink, ignore_y=a.ignore_y, rotation=a.rotation)
     found, chunk_files = scan_chunks_for_hashes(a.world, {e['hash'] for e in exp})
     res = reconcile(exp, found, a.margin, ignore_y=a.ignore_y)
     if a.ignore_y:

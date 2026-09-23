@@ -244,8 +244,8 @@ def cmd_autosite(a, st):
             m = json.load(f)
         xs = [q['x'] for q in m['pieces']] or [0]
         zs = [q['z'] for q in m['pieces']] or [0]
-        fw = max(32.0, max(xs) - min(xs))
-        fd = max(32.0, max(zs) - min(zs))
+        fw, fd = bp_autosite.rotated_extent(max(xs) - min(xs), max(zs) - min(zs), a.rotation)
+        fw, fd = max(32.0, fw), max(32.0, fd)
     tile_w, tile_d = fw + 2 * a.site_margin, fd + 2 * a.site_margin
     records = bp_reconcile.full_scan(world, bp_reconcile.load_hashlib())
     near = (a.near_x, a.near_z, a.near_r) if a.near_x is not None and a.near_z is not None else None
@@ -294,7 +294,8 @@ def gen_cfg(p):
                   ('AutoDetectGroundLayer', 'true'), ('PerPieceGround', 'false'),
                   ('Force', 'false'), ('Reconcile', 'true'),
                   ('BatchSize', '60'), ('FrameDelay', '10'), ('PieceFile', 'bp_pieces.txt'),
-                  ('AutoPlatformY', 'true', '落地高度在游戏里实测（地面层件位置的地形中位数）；false = 用 [Terrain] PlatformY')])
+                  ('AutoPlatformY', 'true', '落地高度在游戏里实测（地面层件位置的地形中位数）；false = 用 [Terrain] PlatformY'),
+                  ('Rotation', p.get('rotation', 0), '蓝图朝向（度，俯视顺时针，绕蓝图包围盒中心）：90 = 原来朝北的门改朝东')])
     sec('Cleanup', [('Enabled', 'true'), ('CleanNature', 'true'), ('WaitActivate', 'true'),
                     ('OnlyPersistent', 'false'), ('ClearAllInArea', 'true'),
                     ('Center1X', p['site_x']), ('Center1Z', p['site_z']), ('Radius1', p['radius']),
@@ -348,6 +349,7 @@ def cmd_install(a, st):
               'ground_py': a.ground_py if a.ground_py is not None
               else st['stages'].get('preflight', {}).get('ground_py', -1.6),
               'radius': radius, 'protect_x': a.protect_x, 'protect_z': a.protect_z, 'protect_r': a.protect_r,
+              'rotation': a.rotation % 360.0,
               'terrain': not a.no_terrain, 'terrain_dry': a.terrain_dry_run, 'skirt': a.skirt}
     if auto.get('site_x') == site_x and auto.get('site_z') == site_z:
         print('  落点取自 autosite：(%s, %s) PlatformY=%s' % (site_x, site_z, platform_y))
@@ -575,11 +577,11 @@ def cmd_verify(a, st):
     if platform_y is None:
         platform_y = p['platform_y']
     exp = bp_reconcile.transform_pieces(manifest, p['site_x'], p['site_z'],
-                                        platform_y, p['ground_py'], 0.0, sink)
+                                        platform_y, p['ground_py'], 0.0, sink, rotation=p.get('rotation', 0.0))
     found, chunk_files = bp_reconcile.scan_chunks_for_hashes(world, {e['hash'] for e in exp})
     res = bp_reconcile.reconcile(exp, found, a.margin)
     res['transform'] = {'origin': [p['site_x'], p['site_z']], 'platform_y': platform_y,
-                        'ground_py': p['ground_py'], 'sink': sink}
+                        'ground_py': p['ground_py'], 'sink': sink, 'rotation': p.get('rotation', 0.0)}
     res['pass'] = bp_reconcile.verdict(res, a.min_rate)
     with open(os.path.join(a.work, 'reconcile.json'), 'w', encoding='utf-8') as f:
         json.dump(res, f, ensure_ascii=False, indent=1)
@@ -791,6 +793,8 @@ def main(argv=None):
     ap.add_argument('--no-terrain', action='store_true', help='不改地形（只放件；原地形起伏大时会有件悬空/埋土）')
     ap.add_argument('--terrain-dry-run', action='store_true', help='地形只算方案、出 dump，不写一个顶点')
     ap.add_argument('--skirt', type=float, default=6.0, help='占地外过渡带宽度（米，默认 6）：平滑接回原地形')
+    ap.add_argument('--rotation', type=float, default=0.0,
+                    help='蓝图朝向（度，俯视顺时针，绕包围盒中心；90 = 原来朝北的门改朝东）。autosite 按转后占地选格子')
     ap.add_argument('--site-margin', type=float, default=16.0, help='autosite 格子外扩（米，默认 16）')
     ap.add_argument('--near-x', type=float, help='autosite 只在这附近找（用户给的大致方位）')
     ap.add_argument('--near-z', type=float)

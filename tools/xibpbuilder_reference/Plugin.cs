@@ -59,7 +59,7 @@ namespace XiBpBuilder
         // ====================================================================
         // [Build]
         internal static ConfigEntry<bool>   CfgEnabled, CfgForce, CfgReconcile, CfgPerPieceGround, CfgAutoDetectGround, CfgAutoPlatformY;
-        internal static ConfigEntry<float>  CfgOriginX, CfgOriginZ, CfgYOffset, CfgGroundLayerPy, CfgBatchSize, CfgFrameDelay;
+        internal static ConfigEntry<float>  CfgOriginX, CfgOriginZ, CfgYOffset, CfgGroundLayerPy, CfgBatchSize, CfgFrameDelay, CfgRotation;
         internal static ConfigEntry<string> CfgPieceFile;
         // [Cleanup]
         internal static ConfigEntry<bool>   CfgCleanOn, CfgCleanNature, CfgWaitActivate, CfgOnlyPersistent, CfgClearAllInArea;
@@ -100,6 +100,9 @@ namespace XiBpBuilder
             // 落地高度 = 地面层件所在位置的**实测地形**中位数（游戏里量，不再用离线自然物代理值——
             // 代理值差几米就是「房子比地面高一截、门口跳不上去」）。false = 用 [Terrain] PlatformY 手填值
             CfgAutoPlatformY = Config.Bind("Build", "AutoPlatformY", true);
+            // 蓝图朝向：绕蓝图包围盒中心旋转的角度（度，俯视顺时针 = Unity yaw；90 = 原来朝北的门改朝东）。
+            // 件的位置与朝向、#Terrain、原版地形件一起转（PlanBuild 放置时 transform.rotation 的同款语义）
+            CfgRotation  = Config.Bind("Build", "Rotation", 0f);
 
             CfgCleanOn   = Config.Bind("Cleanup", "Enabled", true);
             CfgCleanNature = Config.Bind("Cleanup", "CleanNature", true);
@@ -252,8 +255,9 @@ namespace XiBpBuilder
             yield return new WaitForSeconds(2f);   // REF: 等 zone 系统起来
 
             var pieces = LoadPieces();
-            Log.LogInfo($"件清单载入 {pieces.Count} 件 | 落点 ({CfgOriginX.Value},{CfgOriginZ.Value})");
+            Log.LogInfo($"件清单载入 {pieces.Count} 件 | 落点 ({CfgOriginX.Value},{CfgOriginZ.Value}) | 朝向 {CfgRotation.Value:F1}°");
             if (pieces.Count == 0) { Log.LogWarning("件清单为空，中止"); yield break; }
+            InitFrame(pieces);
 
             // 段1 已冻磨损（s_freezeWear=true 默认）。段0 Activate 由 FixedUpdate postfix 持续生效。
             // 等激活覆盖生效 + zone 长齐
@@ -359,6 +363,24 @@ namespace XiBpBuilder
         }
 
         // ====================================================================
+        //  蓝图坐标 → 世界坐标（唯一出处）：绕蓝图包围盒中心转 Rotation，再平移到落点
+        //  包围盒中心按件清单全集算（含原版地形件）—— 与 bp_reconcile.transform_pieces 同口径
+        // ====================================================================
+        internal static float s_cx, s_cz;
+        internal static Quaternion s_yaw = Quaternion.identity;
+        private static void InitFrame(List<Piece> pieces)
+        {
+            s_cx = (pieces.Min(p => p.x) + pieces.Max(p => p.x)) / 2f;
+            s_cz = (pieces.Min(p => p.z) + pieces.Max(p => p.z)) / 2f;
+            s_yaw = Quaternion.Euler(0f, CfgRotation.Value, 0f);
+        }
+        private static Vector3 ToWorld(float px, float py, float pz, float baseY)
+        {
+            Vector3 d = s_yaw * new Vector3(px - s_cx, 0f, pz - s_cz);
+            return new Vector3(CfgOriginX.Value + d.x, baseY + py, CfgOriginZ.Value + d.z);
+        }
+
+        // ====================================================================
         //  落地高度（件放下之前在游戏里实测；同一落点的后续 run 沿用首测值）
         // ====================================================================
         internal static float s_platformY;
@@ -379,8 +401,6 @@ namespace XiBpBuilder
                 WriteRuntime("PlatformY", s_platformY);
                 return true;
             }
-            float cx = (pieces.Min(p => p.x) + pieces.Max(p => p.x)) / 2f;
-            float cz = (pieces.Min(p => p.z) + pieces.Max(p => p.z)) / 2f;
             var offs = new List<float>();     // 地面层件：实测地形 − 件 py → 整栋竖直偏移（中位数 = 挖填最少）
             var nearH = new List<float>();    // 贴地件（地面层往上 Cap 内）：可行性预检用
             var nearPy = new List<float>();
@@ -388,7 +408,7 @@ namespace XiBpBuilder
             {
                 if (pc.y > CfgGroundLayerPy.Value + CfgLayerTol.Value + CfgCap.Value) continue;
                 if (pc.y < CfgGroundLayerPy.Value - CfgSink.Value) continue;          // 深桩 / 下层结构：不贴原地形，不参与定高与预检
-                var w = new Vector3(CfgOriginX.Value + pc.x - cx, 0f, CfgOriginZ.Value + pc.z - cz);
+                var w = ToWorld(pc.x, 0f, pc.z, 0f);
                 if (!Heightmap.GetHeight(w, out float h)) continue;
                 nearH.Add(h);
                 nearPy.Add(pc.y);
@@ -577,25 +597,17 @@ namespace XiBpBuilder
         private IEnumerator BuildTask(List<Piece> pieces)
         {
             Log.LogInfo("[落地] 开始");
-            float cx = pieces.Average(p => p.x), cz = pieces.Average(p => p.z);   // ◐DOC: 蓝图中心
-            // 更严谨用包围盒中心：(min+max)/2，与 land_official.py 一致
-            float minX = pieces.Min(p=>p.x), maxX = pieces.Max(p=>p.x);
-            float minZ = pieces.Min(p=>p.z), maxZ = pieces.Max(p=>p.z);
-            cx = (minX+maxX)/2f; cz = (minZ+maxZ)/2f;
             float groundBase = s_platformY - CfgGroundLayerPy.Value;   // PlatformY 已在游戏里实测（ResolvePlatformY）
 
             int batch = 0, created = 0, fail = 0;
             s_terrainOps.Clear();
             foreach (var pc in pieces.OrderBy(p => p.y))   // ✓DOC: 按 py 低→高，先地基后上层
             {
-                Vector3 world = new Vector3(
-                    CfgOriginX.Value + (pc.x - cx),
-                    groundBase + pc.y + CfgYOffset.Value,
-                    CfgOriginZ.Value + (pc.z - cz));
+                Vector3 world = ToWorld(pc.x, pc.y + CfgYOffset.Value, pc.z, groundBase);
                 // 原版地形件（锄头整地 mud_road / 路面 paved_road…）不是建筑：建成 ZDO 会被反复实例化、反复改地形。
                 // 按原版做法当「地形操作」在地形段执行（PlanBuild 放置蓝图时也是直接实例化让 TerrainOp 自己跑）
                 var top = TerrainOpPrefab(pc.hash, pc.name);
-                if (top != null) { s_terrainOps.Add(new TerrainOpPiece { prefab = top, pos = world, rot = pc.rot }); continue; }
+                if (top != null) { s_terrainOps.Add(new TerrainOpPiece { prefab = top, pos = world, rot = s_yaw * pc.rot }); continue; }
                 if (CreatePiece(pc, world)) { created++; } else { fail++; }
 
                 if (++batch % (int)CfgBatchSize.Value == 0)
@@ -626,7 +638,7 @@ namespace XiBpBuilder
             if (zdo == null) return false;
             zdo.SetPrefab(hash);                 // ✓DOC 坑 #2：不显式调 → hash 全 0 → 不可见
             zdo.SetPosition(world);              // ✓DOC
-            zdo.SetRotation(pc.rot);             // ✓DOC: 全四元数（不要只传 yaw）
+            zdo.SetRotation(s_yaw * pc.rot);     // ✓DOC: 全四元数（不要只传 yaw）；蓝图朝向叠在件自身朝向之前
             zdo.Persistent = true;               // ✓DOC: flags bit8
             zdo.SetOwner(0L);                    // ✓DOC: 无主，等 Activate 认领
             zdo.Set(CfgMarkKey.Value, 1);        // ◐DOC: 打标，供 Support Lock / 保护圈识别
@@ -826,16 +838,14 @@ namespace XiBpBuilder
                 if (Dist2D(p, CfgOriginX.Value, CfgOriginZ.Value) > 45f) continue;   // ✓DOC 45m
                 have.Add(Key(h, p));   // ✓DOC: hash|round(x*4)|round(y*4)|round(z*4)
             }
-            float cx = (pieces.Min(p=>p.x)+pieces.Max(p=>p.x))/2f;
-            float cz = (pieces.Min(p=>p.z)+pieces.Max(p=>p.z))/2f;
             float groundBase = s_platformY - CfgGroundLayerPy.Value;
             int miss = 0, rebuilt = 0, rebuildFail = 0;
             s_terrainOps.Clear();
             foreach (var pc in pieces.OrderBy(p=>p.y))   // ✓DOC: 低→高补建
             {
-                Vector3 world = new Vector3(CfgOriginX.Value+(pc.x-cx), groundBase+pc.y+CfgYOffset.Value, CfgOriginZ.Value+(pc.z-cz));
+                Vector3 world = ToWorld(pc.x, pc.y + CfgYOffset.Value, pc.z, groundBase);
                 var top = TerrainOpPrefab(pc.hash, pc.name);    // 原版地形件本来就不留 ZDO，不算缺失（terrain_done 缺时交给地形段重做）
-                if (top != null) { s_terrainOps.Add(new TerrainOpPiece { prefab = top, pos = world, rot = pc.rot }); continue; }
+                if (top != null) { s_terrainOps.Add(new TerrainOpPiece { prefab = top, pos = world, rot = s_yaw * pc.rot }); continue; }
                 if (!Present(have, pc.hash, world))
                 {
                     miss++;
@@ -1046,7 +1056,7 @@ namespace XiBpBuilder
         }
 
         // 本工具件（mark==1）在蓝图范围内的实测碰撞体。issue #8/#16 的「无碰撞体」多数是碰撞体挂在子物体上 → 取整棵子树
-        private List<PBox> MeasureOurPieces(float halfX, float halfZ, out int noCollider)
+        private List<PBox> MeasureOurPieces(float radius, out int noCollider)
         {
             var list = new List<PBox>();
             noCollider = 0;
@@ -1057,7 +1067,7 @@ namespace XiBpBuilder
                 var nv = w.GetComponent<ZNetView>();
                 if (nv == null || !nv.IsValid() || nv.GetZDO().GetInt(CfgMarkKey.Value, 0) != 1) continue;
                 Vector3 p = w.transform.position;
-                if (Mathf.Abs(p.x - ox) > halfX + 3f || Mathf.Abs(p.z - oz) > halfZ + 3f) continue;
+                if (Dist2D(p, ox, oz) > radius + 3f) continue;                       // 半径筛：蓝图可能旋转过
                 bool any = false;
                 var b = new Bounds();
                 foreach (var c in w.GetComponentsInChildren<Collider>())
@@ -1076,8 +1086,7 @@ namespace XiBpBuilder
         private TerrainPlan BuildTerrainPlan(List<Piece> pieces)
         {
             float bx0 = pieces.Min(p => p.x), bx1 = pieces.Max(p => p.x), bz0 = pieces.Min(p => p.z), bz1 = pieces.Max(p => p.z);
-            float cx = (bx0 + bx1) / 2f, cz = (bz0 + bz1) / 2f;
-            var plan = new TerrainPlan { boxes = MeasureOurPieces((bx1 - bx0) / 2f, (bz1 - bz0) / 2f, out int noCol) };
+            var plan = new TerrainPlan { boxes = MeasureOurPieces(0.5f * Mathf.Sqrt((bx1 - bx0) * (bx1 - bx0) + (bz1 - bz0) * (bz1 - bz0)), out int noCol) };
             var ground = plan.boxes.Where(q => Mathf.Abs(q.pivotY - s_platformY) <= CfgLayerTol.Value)
                                    .Select(q => q.b.min.y).OrderBy(y => y).ToList();
             Log.LogInfo($"[地形] 开始：实测本工具件碰撞体 {plan.boxes.Count} 个（无碰撞体 {noCol}），地面层 {ground.Count} 个");
@@ -1203,9 +1212,10 @@ namespace XiBpBuilder
                     Log.LogWarning($"[地形] #Terrain 未知 shape={e.shape}，跳过（PlanBuild 同样只认 circle/square）");
                     continue;
                 }
-                float ex = CfgOriginX.Value + e.x - cx, ez = CfgOriginZ.Value + e.z - cz, ey = baseY + e.y;
+                Vector3 ew = ToWorld(e.x, e.y, e.z, baseY);
+                float ex = ew.x, ez = ew.z, ey = ew.y;
                 int ccx = Mathf.FloorToInt(ex + 0.5f), ccz = Mathf.FloorToInt(ez + 0.5f);   // = Heightmap.WorldToVertex 的取整
-                float r = Mathf.Max(e.radius, 0.01f), ang = e.rotation * Mathf.Deg2Rad, co = Mathf.Cos(ang), si = Mathf.Sin(ang);
+                float r = Mathf.Max(e.radius, 0.01f), ang = (e.rotation + CfgRotation.Value) * Mathf.Deg2Rad, co = Mathf.Cos(ang), si = Mathf.Sin(ang);
                 int R = Mathf.CeilToInt(r * 1.4143f) + 1;
                 for (int dx = -R; dx <= R; dx++)
                 for (int dz = -R; dz <= R; dz++)

@@ -18,6 +18,7 @@ description: 把 Valheim 蓝图（PlanBuild .blueprint / BuildShare .vbuild / zi
 | 回放蓝图 `#Terrain`（PlanBuild 语义）；vbuild 里的锄头件当作者地面采样点逐点还原 | 斜梁等非纯 yaw 件的倾斜（按 yaw 落地，需目视） |
 | 落地时跑原版承重预演，给「删掉插件会塌」的最底层件接地（埋住的挖出来、悬空的垫起来） | 原版物理本来就撑不住的件（石头压在木头上、悬空装饰）——只能如实列出、观测时会塌 |
 | 保护圈（主宅 + 护城河）内一个顶点都不改 | |
+| 旧址重建：拆掉旧版建的房子（按标记，不掉料），把被旧版清理搬走的整格地形还原（见「旧址重建」） | |
 
 「零 mod」的准确含义：**玩家客户端零安装**；服务器只在落地窗口里临时装 BepInEx + 执行器，落地完删净，建筑本身是 100% 原版世界数据。
 
@@ -80,14 +81,15 @@ python tools/bp_pipeline.py verify --work $W --world "$WORLD"
 python tools/bp_terrain_report.py $W/bp_terrain_dump.csv --png $W/terrain.png
 
 # 7 承重验收 + 持久化复核（必做，一次起服两件事）：关支撑锁、区域激活（服务器替玩家把工地实例化、跑原版承重），
-#   观测 5 分钟件数时序 + 锤子同款承重色（蓝 = 满支撑 → 绿 → 黄 → 红，红再往下就塌）；flag 全保留、不重建不改地形；
-#   顺带按 dump 逐点复核地形持久化。观测期本工具件塌了不掉建材；塌件逐件写 $W/bp_observe_lost.csv
-python tools/bp_pipeline.py observe --work $W --server "$SRV" --bat "$BAT" --observe-minutes 5
+#   每 10s 记件数 + 锤子同款承重色（蓝 = 满支撑 → 绿 → 黄 → 红，红再往下就塌），最长 2 分钟，件数与承重色连续 30s
+#   不变即提前结束（实测塌件都在前 40s）；flag 全保留、不重建不改地形；顺带按 dump 逐点复核地形持久化。
+#   观测期本工具件塌了不掉建材；塌件逐件写 $W/bp_observe_lost.csv
+python tools/bp_pipeline.py observe --work $W --server "$SRV" --bat "$BAT"
 python tools/bp_pipeline.py verify --work $W --world "$WORLD"            # 观测期塌掉的件会反映在这里
 python tools/bp_terrain_report.py $W/bp_terrain_dump.csv                 # |reload − after| ≤ 0.05m
 #   ⚠ 建造时插件默认锁住本工具件的支撑（落地窗口防掉件）——锁着的存活率不代表删掉插件后不塌，必须过这一步
 #   塌了件：把 bp_observe_lost.csv 按 prefab / 材质 / 位置讲给用户（例：「地下室顶上 10 块石拱——原版石头
-#   不能压在木梁上」），再 observe 一次：第二次必须一件不塌（塌完剩下的就是原版稳定态，删插件后不会再塌）
+#   不能压在木梁上」）。塌完剩下的就是原版稳定态（8 轮实测第二次 observe 全是 0），想复核可以再跑一次 observe
 
 # 8 删净 BepInEx（玩家侧全程零安装）+ 报告
 python tools/bp_pipeline.py teardown --work $W --server "$SRV"
@@ -104,7 +106,7 @@ python tools/bp_pipeline.py report --work $W
 | 地形报告 | 过渡带末端改动 < 0.3m | 与原地形无缝衔接 |
 | `verify` | 存活率（算上挪位）= 100%，或用户接受的 `--min-rate`；「挪位」= 同件水平 ≤1m、高差 ≤3m（草木被游戏贴到整过的地面、推车滚动），件还在；observe 之后真缺的应正好是塌掉的那些 | 件没丢 |
 | `run` | `承重预演：删掉插件后预计一件不塌`；否则剩下的件逐一跟用户说明 | 落地时就知道哪些件原版撑不住 |
-| `observe` | 支撑锁关 5 分钟内本工具件数不减（`承重观测 … 一件没塌`）；塌了的话第二次 observe 必须 0 | 删掉插件后玩家走近也不会塌 |
+| `observe` | 支撑锁关后本工具件数不减（`承重观测 … 一件没塌`）；塌了的件都能用「原版撑不住」解释（与承重预演一致） | 删掉插件后玩家走近也不会塌 |
 | `observe` | `重载复核 … 持久化 ✓` | 地形在 zone 重载后还在 |
 
 **断崖的三种口径**（相邻顶点高差 > 1.5m）：一端是 `B`（地窖坑壁）/ `E`（蓝图 `#Terrain`：作者挖的院子、露台）/
@@ -127,7 +129,8 @@ python tools/bp_pipeline.py report --work $W
 | 露缝多 | 件碰撞体与平台高度不匹配 | 看对比图定位；`Cap`（默认 1m）调大后删 flag 重跑 |
 | 地形验收不过（误差 > 0.5m） | heightmap 未重算 / 反射失败 | 看 `[地形] ★` 行；删 `terrain_done.flag` 重跑一次，仍不过就停下报告 |
 | 重载复核漂移 | delta 没持久化 | 立刻停手，用备份回滚，报告给用户 |
-| `承重预演：预计会塌 N 件` / observe 塌件 | 原版承重撑不住：石头压木头（石头最小支撑 100 = 木头上限）、悬空装饰、作者用了免承重 mod；或件本该靠的地形在房子地板下 / `#Terrain` 区 / 保护圈里、超过 7.5m，接地修补不能动 | 按 `bp_observe_lost.csv`（prefab、材质、蓝图坐标）讲给用户，说清是哪类；再 observe 一次确认 0。不要为了「一件不塌」把支撑锁留着交付——删插件就塌 |
+| `承重预演：预计会塌 N 件` / observe 塌件 | 原版承重撑不住：石头压木头（石头最小支撑 100 = 木头上限）、悬空装饰、作者用了免承重 mod；或件本该靠的地形在房子地板下 / `#Terrain` 区 / 保护圈里、超过 7.5m，接地修补不能动 | 按 `bp_observe_lost.csv`（prefab、材质、蓝图坐标）讲给用户，说清是哪类。不要为了「一件不塌」把支撑锁留着交付——删插件就塌 |
+| 一整格地形没了、zone 交界处（64m 网格线）一道直线断层；主宅护城河断在网格线上 | 旧版执行器的清理把 zone 中心的 `_TerrainCompiler` 搬到了世界角落（整格地形修改跟着走了） | 见「旧址重建」：`bp_terrain_restore.py` 从那次落地前的备份整格还原；新执行器的清理已不碰系统 ZDO |
 | `服务器提前退出` / `'valheim_server' 不是内部或外部命令` | 启动脚本端口 / 存档不对，或 bat 是 LF 换行 | 看 `$W/server_stdout.log`；bat 必须 CRLF |
 
 ## 回滚
@@ -136,6 +139,32 @@ python tools/bp_pipeline.py report --work $W
 - **只撤执行器**：`teardown` 已把 BepInEx 四件套移到 `$W/quarantine-*`，移回即恢复。
 - 2026-09-22 及以前的执行器 `[Terrain]` 会把落点周围约 190m 见方整块压平（斜坡、断层、贴图错乱、不看保护圈）；
   受影响的世界只能用那次落地前的备份回滚，再用本 skill 重建。
+
+## 旧址重建（拆旧版建的房子 + 还原它弄坏的地形）
+
+用户说「把那个断层房子拆了重建」时。旧版执行器的清理会把落点半径内**所有** ZDO 搬到世界角落——包括 zone 中心的
+`_TerrainCompiler`：那一整格的地形修改（玩家的护城河、地基…）就没了，和相邻格交界处齐刷刷一道断层。
+
+```bash
+# 1 找被搬走的那格：拿「旧版落地前的最后一个备份」和「现在」各扫一次落点附近的地形编译器
+python tools/bp_terrain_restore.py scan <旧版落地前的备份世界> --near <旧落点x> <旧落点z> 100
+python tools/bp_terrain_restore.py scan "$WORLD" --near <旧落点x> <旧落点z> 100
+#   某格在备份里有、现在没了（或只剩玩家后来零星挖的）= 被搬走的那格，记下它的 zone 中心 (cx, cz)
+#   旧版落地前的备份：看执行器 BepInEx/config 里 bp_done.flag 的时间，取在它之前保存的那一代（_main.N.ok 的时间）
+# 2 生成还原文件：底 = 备份里那格；叠 = 玩家后来在备份没改过的地方新挖的；zone 边上的共用顶点照抄相邻格现在的值
+python tools/bp_terrain_restore.py plan <旧版落地前的备份世界> "$WORLD" <cx> <cz> $W/bp_terrain_restore.txt
+# 3 保护圈按「主宅 + 护城河」量：护城河在 scan 的 delta 里是一圈挖低带（< -1.5m），圈要把它整个包住、再留余量
+# 4 install 多带两组参数；其余照常（先副本世界演练，再正式服）
+python tools/bp_pipeline.py install ... --demolish-x <旧落点x> --demolish-z <旧落点z> --demolish-r <旧房半对角+8> \
+    --terrain-restore $W/bp_terrain_restore.txt
+#   执行器落地前依次：整格还原 → 拆旧（只销毁带标记的旧件、不掉料；有东西的箱子不拆、逐个报）→ 只搬自然物的清理
+# 5 跑完核查：保护圈内那格 = 备份（玩家后来新挖的按设计保留）、四条接缝两侧一致、主宅那格一个顶点没动
+python tools/bp_terrain_restore.py verify "$WORLD" <备份世界> <落地前的世界备份> <cx> <cz> <px> <pz> <pr>
+```
+
+正式服上的旧执行器（带 `[Activate]` 的旧版会让服务器一直把工地当成有玩家在、没人在线也空跑）在 `install`
+时连同整套 BepInEx 一起隔离到 `$W/quarantine-install-*`；`teardown` 之后服务器是纯原版。**不要把旧执行器装回去**：
+它的对账补建（`Reconcile=true`）会照旧件清单把拆掉的旧房子重新补出来。
 
 ## 地形段在做什么（解释给用户 / 改代码时看）
 
@@ -176,6 +205,7 @@ delta 与 paint mask，然后 `ClaimOwnership → Save → Heightmap.Poke(0,fals
 | skeggoxmanor（3117 件，48×57m，斜撑架空大宅） | 主宅旁、原地形高差 4.8m、保护圈 r≈64m 压进过渡带 | 改 2817 顶点；平台误差 0；露缝 0/502；我们整出的断层 0（15 处是接地土台边沿）；保护圈内 0 改动；重载复核 max 0.001m | 预演 69 → 接地修补 42 顶点 → 59；observe #1 塌 57（**石柱 ×54 立在架空木平台上——原版石头不能压木头**；45° 斜梁 ×3），#2 塌 0；对账 2883 + 挪位 177（草木贴地、推车）/ 3117，真缺 57 = 塌掉的 |
 | nelesstarterbase（2053 件，16 条 `#Terrain`，下沉院子 + 地下室） | 平地 | `#Terrain` 回放 + 地窖；改 1496 顶点；144 处断崖全是作者院子 / 地下室的挡土墙，我们整出的断层 0；露缝 0/330；重载复核 max 0.001m | 预演 10 = observe #1 塌 10（**地下室顶 10 块石拱压在木梁上**——同样是石头压木头；在作者 `#Terrain` 坑里，接地修补不动），#2 塌 0；对账 2042 + 挪位 1（推车）/ 2053，真缺 10 = 塌掉的 |
 | longhouse.vbuild（1332 件 + 365 个锄头件，山坡长屋） | 主宅东约 100m | 锄头件采样 1210 顶点；接地修补 38 顶点（南侧下层结构挖出 4.5–7m、西北木桩垫高）；改 3999 顶点；我们整出的断层 0（116 处是下层坑壁 / 作者地面的坎，5 处原地形陡坎）；露缝 0/586 | 预演 31 → 16；observe #1 塌 12（门楣上叠的梁 + 半墙装饰柱 ×11、物品架 ×1），#2 塌 0；对账 1320/1332，真缺 12 = 塌掉的 |
+| **正式服旧址重建**：拆 usagi-forest-lodge（旧版建的，4865 个带标记的件）→ 建 nelesstarterbase | 主宅东侧；旧版清理搬走了那格的地形编译器、护城河东段被抹平 | 先副本世界演练、再正式服，两边数字完全一致：整格还原 761 个改高 / 1088 个刷漆顶点；接缝 260/260 一致；主宅那格 0 改动；保护圈内 0 改动；我们整出的断层 0；新房 2053/2053、露缝 0/330 | 拆旧 4865、有东西的箱子 0、玩家自己的件 0；预演 10 = observe 塌 10（地下室石拱），第二次 0；对账 2042 + 挪位 1 / 2053；最后删净 BepInEx，服务器纯原版 |
 
 修复前（支撑锁开着验收、锄头件原样重放、没有接地修补）关锁实测：skeggoxmanor 塌 66、nelesstarterbase 10、
 longhouse 50（木桩墙整排、南侧下层整层）。

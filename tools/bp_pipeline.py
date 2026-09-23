@@ -301,7 +301,8 @@ def gen_cfg(p):
                   ('AutoPlatformY', 'true', '落地高度在游戏里实测（地面层件位置的地形中位数）；false = 用 [Terrain] PlatformY'),
                   ('Rotation', p.get('rotation', 0), '蓝图朝向（度，俯视顺时针，绕蓝图包围盒中心）：90 = 原来朝北的门改朝东')])
     sec('Cleanup', [('Enabled', 'true'), ('CleanNature', 'true'), ('WaitActivate', 'true'),
-                    ('OnlyPersistent', 'false'), ('ClearAllInArea', 'true'),
+                    ('OnlyPersistent', 'false'),
+                    ('ClearAllInArea', 'false', '只搬自然物；系统 ZDO（_TerrainCompiler 整格地形等）、玩家件、容器、墓碑永远不动'),
                     ('Center1X', p['site_x']), ('Center1Z', p['site_z']), ('Radius1', p['radius']),
                     ('ProtectX', p['protect_x']), ('ProtectZ', p['protect_z']), ('ProtectRadius', p.get('protect_r', 20))])
     sec('Terrain', [('Enabled', 'true' if p.get('terrain', True) else 'false',
@@ -315,9 +316,14 @@ def gen_cfg(p):
                     ('MaxDelta', '8', '游戏硬限 ±8m：任一满权重顶点超限 → 整段放弃，一个顶点都不改'),
                     ('GroundFix', 'true', '承重预演（原版 UpdateSupport 跑到收敛）后，给删掉插件会塌的最底层件接地：埋住的挖出来、悬空的垫起来，最多 3 轮'),
                     ('GroundFixMax', '7.5', '接地修补单点最多挖 / 垫多少米（垫超过 Cap 只给包围盒高 ≥1.5m 的柱/墙/桩）'),
+                    ('RestoreFile', 'bp_terrain_restore.txt' if p.get('terrain_restore') else '',
+                     '整格地形还原（落地前做一次）：tools/tc_restore_plan.py 从旧存档算出；空 = 不做'),
                     ('Paint', 'Dirt'), ('EntryFile', 'bp_terrain.txt'), ('DumpFile', 'bp_terrain_dump.csv'),
                     ('VerifyOnReload', 'true')])
     sec('Activate', [('Enabled', 'true'), ('X', p['site_x']), ('Y', '0'), ('Z', p['site_z'])])
+    dm = p.get('demolish') or [0, 0, 0]
+    sec('Demolish', [('Enabled', 'true' if dm[2] > 0 else 'false', '落地前销毁圈内带标记（MarkKey）的旧件，不掉建材；有东西的箱子不拆'),
+                     ('X', dm[0]), ('Z', dm[1]), ('Radius', dm[2])])
     sec('Anchor', [('AutoSolve', 'true'), ('Target', '200'), ('MaxShift', '2'), ('SinkStep', '0.05')])
     sec('Support', [('Enabled', 'true' if p.get('support', True) else 'false',
                      'issue #13：默认开，落地窗口里锁住本工具件的支撑。⚠ 锁着就测不到真实承重——'
@@ -359,7 +365,11 @@ def cmd_install(a, st):
               else st['stages'].get('preflight', {}).get('ground_py', -1.6),
               'radius': radius, 'protect_x': a.protect_x, 'protect_z': a.protect_z, 'protect_r': a.protect_r,
               'rotation': a.rotation % 360.0,
-              'terrain': not a.no_terrain, 'terrain_dry': a.terrain_dry_run, 'skirt': a.skirt}
+              'terrain': not a.no_terrain, 'terrain_dry': a.terrain_dry_run, 'skirt': a.skirt,
+              'demolish': [a.demolish_x, a.demolish_z, a.demolish_r] if a.demolish_r else None,
+              'terrain_restore': bool(a.terrain_restore)}
+    if a.terrain_restore and not os.path.isfile(a.terrain_restore):
+        die('--terrain-restore 文件不存在: %s' % a.terrain_restore)
     if auto.get('site_x') == site_x and auto.get('site_z') == site_z:
         print('  落点取自 autosite：(%s, %s) PlatformY=%s' % (site_x, site_z, platform_y))
     bep = os.path.join(a.server, 'BepInEx')
@@ -370,6 +380,8 @@ def cmd_install(a, st):
                ('file', os.path.abspath(a.plugin_dll), os.path.join(bep, 'plugins', 'XiBpBuilder.dll')),
                ('file', os.path.join(a.work, 'pieces.txt'), os.path.join(bep, 'config', 'bp_pieces.txt')),
                ('file', os.path.join(a.work, 'terrain.txt'), os.path.join(bep, 'config', 'bp_terrain.txt'))]
+    if a.terrain_restore:
+        actions.append(('file', os.path.abspath(a.terrain_restore), os.path.join(bep, 'config', 'bp_terrain_restore.txt')))
     if a.dry_run:
         for _, s, d in actions:
             print('[dry-run] %s → %s' % (s, d))
@@ -607,7 +619,7 @@ def cmd_observe(a, st):
     cfg = os.path.join(a.server, 'BepInEx', 'config', a.cfg_guid + '.cfg')
     with open(cfg, 'w', encoding='utf-8') as f:
         f.write(gen_cfg(p))
-    print('✓ cfg 改为承重观测：支撑锁关、对账补建关、观测 %.0f 分钟（flag 全保留：不重建、不改地形）' % a.observe_minutes)
+    print('✓ cfg 改为承重观测：支撑锁关、对账补建关、最长观测 %.0f 分钟（件数与承重色连续 30s 不变即提前结束；flag 全保留：不重建、不改地形）' % a.observe_minutes)
     a.timeout = max(a.timeout, int(a.observe_minutes * 60) + 600)
     return cmd_run(a, st)
 
@@ -860,6 +872,10 @@ def main(argv=None):
     ap.add_argument('--no-terrain', action='store_true', help='不改地形（只放件；原地形起伏大时会有件悬空/埋土）')
     ap.add_argument('--terrain-dry-run', action='store_true', help='地形只算方案、出 dump，不写一个顶点')
     ap.add_argument('--skirt', type=float, default=6.0, help='占地外过渡带宽度（米，默认 6）：平滑接回原地形')
+    ap.add_argument('--demolish-x', type=float, default=0.0, help='install：拆旧圈圆心 x（旧版执行器 / 上一次建的房子）')
+    ap.add_argument('--demolish-z', type=float, default=0.0, help='install：拆旧圈圆心 z')
+    ap.add_argument('--demolish-r', type=float, default=0.0, help='install：拆旧圈半径；0 = 不拆')
+    ap.add_argument('--terrain-restore', help='install：整格地形还原文件（tc_restore_plan.py 生成）')
     ap.add_argument('--rotation', type=float, default=0.0,
                     help='蓝图朝向（度，俯视顺时针，绕包围盒中心；90 = 原来朝北的门改朝东）。autosite 按转后占地选格子')
     ap.add_argument('--site-margin', type=float, default=16.0, help='autosite 格子外扩（米，默认 16）')
@@ -876,8 +892,8 @@ def main(argv=None):
     ap.add_argument('--margin', type=float, default=15.0)
     ap.add_argument('--timeout', type=int, default=1800, help='run 段等「编排完成」的超时秒数')
     ap.add_argument('--observe', type=int, default=240, help='编排完成后的件数时序观察窗秒数')
-    ap.add_argument('--observe-minutes', type=float, default=5.0,
-                    help='observe 命令：插件内承重观测时长（分钟，默认 5；支撑锁关、区域激活，每 10s 记件数 + 承重色）')
+    ap.add_argument('--observe-minutes', type=float, default=2.0,
+                    help='observe 命令：插件内承重观测最长时长（分钟，默认 2；支撑锁关、区域激活，每 10s 记件数 + 承重色，连续 30s 不变提前结束）')
     ap.add_argument('--structure-only', action='store_true', help='只落地 Building 类件（过滤家具）')
     ap.add_argument('--i-have-a-backup', action='store_true', help='跳过备份检查（自知有备份时）')
     ap.add_argument('--allow-high-risk', action='store_true', help='地下结构也硬闯（默认劝退）')

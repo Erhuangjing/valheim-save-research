@@ -15,7 +15,8 @@
 2026-09-23 Terrain 段重写为 PlanBuild 式逐点整地（见下节「Terrain 段」）后按同一口径（只替换 `REPLACE_ME`）
 重新编译：0 警告 0 错误，产物 61,952 字节；副本世界测试服三个蓝图实机验收（skeggoxmanor / nelesstarterbase /
 longhouse，数字见 `skills/valheim-blueprint-build/SKILL.md`「实测基准」）。
-同日加承重观测、锄头件采样、承重预演 + 接地修补后：0 警告 0 错误，产物 78,336 字节；三个蓝图关锁 + 区域激活实测。
+同日加承重观测、锄头件采样、承重预演 + 接地修补、安全清理、拆旧、整格地形还原后：0 警告 0 错误，产物 86,016 字节；
+三个蓝图关锁 + 区域激活实测，并在正式服旧址重建一次（数字见 SKILL.md）。
 **运行状态**：隔离环境端到端实测通过（清障→落地→保存，1805/1805 零丢失、prefab 校验失败 0、
 坐标公式反推精确吻合）。已修的运行期问题分三轮：
 第一轮（#7 uint32 hash 溢出 / #8 锚点 NRE 静默 / #9 GUID 致 cfg 不通用）；
@@ -37,6 +38,10 @@ false 掉件 3.7%~15.9%、true ±0）、**#12 锚点位移重构**（全集统�
 | 落地高度 | `[Build] AutoPlatformY=true`：件放下前在游戏里实测地形，整栋竖直偏移 = 中位数(地形高 − 件 py)；首测值存 `bp_runtime.txt`，对账补建 / 重载复核沿用 | 本轮 |
 | 锚点 | 整过地的建筑**跳过**整体位移。⚠ 旧测量本身不可信：层掩码缺 `terrain`、碰撞体只取根节点（91% 件「无碰撞体」）→ 与地形无关地恒定 −1.05m；不开 Terrain 时仍在用，待修 | 本轮 |
 | 判掉件口径 | 清点 mark ZDO（不用总记录数——会混入掉落物/自然物）；支撑体检输出值域与越界计数（防「反射拿错值」被当真没问题） | #16 |
+| 清理 | **只搬自然物**（`ClearAllInArea` 默认 false；名单见 `NatureKeys`）；`_` 开头的系统 ZDO、`LocationProxy`、玩家、墓碑、容器、任何带 `Piece` 的件**永远不动**。旧实现 `ClearAllInArea=true` 且不看这些：把 zone 中心的 `_TerrainCompiler` 搬到世界角落 → 那一整格的地形修改消失（正式服护城河东段就是这么没的，交界处齐刷刷一道断层） | 本轮 |
+| 拆旧 `[Demolish]` | 落地前销毁圈内带 `MarkKey` 标记的旧件（`ZNetScene.Destroy` / `ZDOMan.DestroyZDO`：不走 `WearNTear.Destroy`，不掉建材）；有东西的箱子不拆、逐个报；圈内玩家自己建的件只报数、不动；保护圈内跳过 | 本轮 |
+| 整格地形还原 `[Terrain] RestoreFile` | 落地前把文件里各 zone 的地形编译器数组整格重写（`tools/bp_terrain_restore.py plan` 离线从旧备份算出），同 CommitWrites 存盘刷新；做不成则整段中止、一件不放 | 本轮 |
+| 观测提前结束 | `[Support] ObserveStableSec`（默认 30）：已观测满 60s 且件数与承重色连续这么多秒不变 → 收工；实测塌件都在前 40s、颜色 70s 内收敛 | 本轮 |
 
 ### Terrain 段：PlanBuild 式逐点整地（2026-09-23 重写）
 

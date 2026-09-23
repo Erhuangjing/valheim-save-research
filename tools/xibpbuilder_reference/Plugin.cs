@@ -77,8 +77,11 @@ namespace XiBpBuilder
         internal static ConfigEntry<int>    CfgAnchorTarget;
         // [Support]
         internal static ConfigEntry<bool>   CfgSupportOn, CfgSupportDiag;
-        internal static ConfigEntry<float>  CfgObserveMin, CfgObserveEvery;
+        internal static ConfigEntry<float>  CfgObserveMin, CfgObserveEvery, CfgObserveStable;
         internal static ConfigEntry<bool>   CfgGroundFix;
+        internal static ConfigEntry<bool>   CfgDemOn;
+        internal static ConfigEntry<float>  CfgDemX, CfgDemZ, CfgDemR;
+        internal static ConfigEntry<string> CfgRestoreFile;
         internal static ConfigEntry<float>  CfgGroundFixMax;
         internal static ConfigEntry<string> CfgMarkKey;
 
@@ -111,7 +114,8 @@ namespace XiBpBuilder
             CfgCleanNature = Config.Bind("Cleanup", "CleanNature", true);
             CfgWaitActivate= Config.Bind("Cleanup", "WaitActivate", true);   // ✓DOC 坑
             CfgOnlyPersistent = Config.Bind("Cleanup", "OnlyPersistent", false); // ✓DOC: 必须 false
-            CfgClearAllInArea = Config.Bind("Cleanup", "ClearAllInArea", true);  // ✓DOC: 别信白名单
+            // false = 只搬自然物（树 / 灌木 / 石头 / 可采集物）。true 也永远不动系统 ZDO、玩家件、容器、墓碑（见 IsUntouchable）
+            CfgClearAllInArea = Config.Bind("Cleanup", "ClearAllInArea", false);
             CfgC1X = Config.Bind("Cleanup", "Center1X", -262f);
             CfgC1Z = Config.Bind("Cleanup", "Center1Z", 270f);
             CfgR1  = Config.Bind("Cleanup", "Radius1", 32f);
@@ -142,6 +146,13 @@ namespace XiBpBuilder
             CfgTerrainDump  = Config.Bind("Terrain", "DumpFile", "bp_terrain_dump.csv");  // 逐顶点 改前/目标/改后，离线出报告用
             // 承重预演后给「删掉插件会塌」的最底层件接地：埋住的挖出来（≤ GroundFixMax）、悬空的垫起来（> Cap 只给高件），最多 3 轮
             CfgGroundFix    = Config.Bind("Terrain", "GroundFix", true);
+            // 拆旧房：落地前销毁圈内带 MarkKey 标记的旧件（本工具 / 旧版执行器建的），不掉建材；有东西的箱子不拆
+            CfgDemOn = Config.Bind("Demolish", "Enabled", false);
+            CfgDemX  = Config.Bind("Demolish", "X", 0f);
+            CfgDemZ  = Config.Bind("Demolish", "Z", 0f);
+            CfgDemR  = Config.Bind("Demolish", "Radius", 0f);
+            // 整格地形还原（空 = 不做）：按文件把 zone 的地形编译器整格写回（离线从旧存档算好，见 SKILL.md）
+            CfgRestoreFile = Config.Bind("Terrain", "RestoreFile", "");
             CfgGroundFixMax = Config.Bind("Terrain", "GroundFixMax", 7.5f);
             CfgVerifyOnReload = Config.Bind("Terrain", "VerifyOnReload", true);           // 下次起服时复核地形是否持久化
 
@@ -163,6 +174,9 @@ namespace XiBpBuilder
             //（不锁支撑）→ 该塌的真塌。每 ObserveInterval 秒记一次件数 + 锤子同款承重色分布；0 = 不观测
             CfgObserveMin   = Config.Bind("Support", "ObserveMinutes", 0f);
             CfgObserveEvery = Config.Bind("Support", "ObserveInterval", 10f);
+            // 件数与承重色连续这么多秒不变（且已观测满 60s）就提前结束；0 = 跑满 ObserveMinutes。
+            // 实测（3 个蓝图 8 轮）：塌件都发生在前 40s，承重色 70s 内收敛
+            CfgObserveStable = Config.Bind("Support", "ObserveStableSec", 30f);
             CfgMarkKey     = Config.Bind("Support", "MarkKey", "xiabp");
 
             // ---- Harmony：逐个显式注册（✓DOC 坑 B：不是 CreateAndPatchAll，忘注册会静默失效）----
@@ -292,6 +306,16 @@ namespace XiBpBuilder
             // 等激活覆盖生效 + zone 长齐
             yield return StartCoroutine(WaitActivateSettled());
 
+            // 段1b 整格地形还原 → 拆旧房（都只做一次；都在清理、定高、落地之前）
+            if (!string.IsNullOrEmpty(CfgRestoreFile.Value) && !HasFlag("terrain_restore_done"))
+            {
+                bool ok = false;
+                yield return StartCoroutine(TerrainRestoreTask(r => ok = r));
+                if (!ok) { Log.LogError("=== 编排中止：地形还原没做成（见上），一件没放 ==="); yield break; }
+            }
+            if (CfgDemOn.Value && CfgDemR.Value > 0f && !HasFlag("demolish_done"))
+                yield return StartCoroutine(DemolishTask());
+
             // 段2 Cleanup（清障）
             if (CfgCleanOn.Value && (!HasFlag("cleanup_done") || CfgForce.Value))
                 yield return StartCoroutine(CleanupTask());
@@ -385,6 +409,7 @@ namespace XiBpBuilder
                     if (InProtectCircle(p)) continue;                              // ✓DOC: 保护圈
                     bool inClean = Dist2D(p, CfgC1X.Value, CfgC1Z.Value) < CfgR1.Value;
                     if (!inClean) continue;
+                    if (IsUntouchable(zdo)) continue;                              // 系统 ZDO / 玩家件 / 容器 / 墓碑
                     if (!CfgClearAllInArea.Value && !IsNatureOrRuin(zdo)) continue;
                     if (CfgOnlyPersistent.Value && !zdo.Persistent) continue;      // ✓DOC: 默认 false，别跳过自然物
                     zdo.SetPosition(new Vector3(6000f, -400f, 6000f));             // ✓DOC: 搬到世界角落
@@ -969,6 +994,8 @@ namespace XiBpBuilder
             float t0 = Time.time;
             s_observing = true; s_noDrop = 0;
             Log.LogInfo($"[观测] 开始：{seconds:F0}s，每 {every:F0}s 一次；落点 {radius:F0}m 内本工具件 {n0}（支撑锁 {(CfgSupportOn.Value ? "开" : "关")}）");
+            string sig = null;
+            float stableSince = 0f;
             while (Time.time - t0 < seconds)
             {
                 yield return new WaitForSeconds(every);
@@ -984,7 +1011,15 @@ namespace XiBpBuilder
                 Log.LogInfo($"[观测] t={Time.time - t0:F0}s 件 {n}（较开始 {n - n0:+0;-0;0}）| 实例 {inst} | "
                     + $"蓝 {blue} 绿 {green} 黄 {yellow} 红 {red} | 支撑不足 {starved}");
                 last = n;
+                string now = $"{n}|{blue}|{green}|{yellow}|{red}";
+                if (now != sig) { sig = now; stableSince = Time.time; }
+                if (CfgObserveStable.Value > 0f && Time.time - t0 >= 60f && Time.time - stableSince >= CfgObserveStable.Value)
+                {
+                    Log.LogInfo($"[观测] 件数与承重色已连续 {Time.time - stableSince:F0}s 不变 → 提前结束");
+                    break;
+                }
             }
+            seconds = Time.time - t0;                                      // 结束行报实际用时
             s_observing = false;
             var lostBy = new Dictionary<string, int>();
             var lostY = new List<float>();
@@ -1123,7 +1158,24 @@ namespace XiBpBuilder
             Dist2D(p, CfgProtectX.Value, CfgProtectZ.Value) < CfgProtectR.Value;
         private static float Dist2D(Vector3 p, float x, float z) =>
             Mathf.Sqrt((p.x-x)*(p.x-x) + (p.z-z)*(p.z-z));
-        private bool IsNatureOrRuin(ZDO z) { /* REF: 名字/prefab 判定，ClearAllInArea=true 时不走这条 */ return true; }
+        // 永远不动：_ 开头的系统 ZDO（_TerrainCompiler = 整格地形修改、_ZoneCtrl…）、LocationProxy、玩家、墓碑、
+        // 容器、任何带 Piece 的件（玩家建的东西，含传送门、床）。旧版清理不看这些 → 把 zone 中心的地形编译器搬走 → 整格地形没了
+        private static bool IsUntouchable(ZDO z)
+        {
+            var pf = ZNetScene.instance ? ZNetScene.instance.GetPrefab(z.GetPrefab()) : null;
+            if (pf == null) return true;                                  // 认不出来的一律不动
+            string n = pf.name;
+            return n.StartsWith("_") || n.StartsWith("LocationProxy") || n.StartsWith("Player")
+                || pf.GetComponent<global::Piece>() != null || pf.GetComponent<Container>() != null || pf.GetComponent<TombStone>() != null;
+        }
+        private static readonly string[] NatureKeys = { "Beech", "Birch", "Oak", "Pinetree", "FirTree", "Fir", "Tree", "tree", "shrub",
+            "Bush", "bush", "Rock", "rock", "stubbe", "Stubbe", "Pickable_", "Raspberry", "Blueberry", "Cloudberry", "Dandelion",
+            "Thistle", "Mushroom", "Sapling", "Driftwood", "Log", "log", "vines", "Vines", "Stone", "Swamp" };
+        private static bool IsNatureOrRuin(ZDO z)
+        {
+            var pf = ZNetScene.instance ? ZNetScene.instance.GetPrefab(z.GetPrefab()) : null;
+            return pf != null && NatureKeys.Any(k => pf.name.Contains(k));
+        }
 
         // ---- Terrain 助手（PlanBuild 式）----
         // 反射成员 2026-09-23 对 assembly_valheim.dll 逐个核对可见性（改动前请重新核对，#19/#22 的教训）：
@@ -1187,6 +1239,95 @@ namespace XiBpBuilder
             }
             else p.ops[k] = new VOp { a = a, w = w };
             p.role[k] = role;
+        }
+
+        // ====================================================================
+        //  拆旧房：圈内带 MarkKey 标记的件全部销毁（ZNetScene.Destroy / ZDOMan.DestroyZDO：不走 WearNTear.Destroy，
+        //  不掉建材、无特效）。有东西的箱子不拆、逐个报；圈内玩家自己建的件（无标记）只报数量，不动
+        // ====================================================================
+        private IEnumerator DemolishTask()
+        {
+            float x = CfgDemX.Value, z = CfgDemZ.Value, r = CfgDemR.Value;
+            var all = EnumAllZDO().Where(d => Dist2D(d.GetPosition(), x, z) <= r && !InProtectCircle(d.GetPosition())).ToList();
+            var targets = all.Where(d => d.GetInt(CfgMarkKey.Value, 0) == 1).ToList();
+            int destroyed = 0, kept = 0, players = 0;
+            var by = new Dictionary<string, int>();
+            foreach (var d in all)
+                if (d.GetInt(CfgMarkKey.Value, 0) != 1 && d.GetLong("creator", 0L) != 0L) players++;
+            Log.LogInfo($"[拆旧] 圈 ({x:F0},{z:F0}) r={r:F0}：带标记的旧件 {targets.Count} 个；圈内玩家自己建的件 {players} 个（不动）");
+            foreach (var d in targets)
+            {
+                var nvi = ZNetScene.instance.FindInstance(d);            // 这版返回 ZNetView
+                var go = nvi ? nvi.gameObject : null;
+                var inv = go ? go.GetComponent<Container>()?.GetInventory() : null;
+                bool full = inv != null ? inv.NrOfItems() > 0 : d.GetString("items", "").Length > 64;
+                var pf = ZNetScene.instance.GetPrefab(d.GetPrefab());
+                string nm = pf ? pf.name : d.GetPrefab().ToString();
+                if (full)
+                {
+                    kept++;
+                    Log.LogWarning($"[拆旧] ⚠ 箱子里有东西，没拆：{nm} @ ({d.GetPosition().x:F1},{d.GetPosition().y:F1},{d.GetPosition().z:F1})"
+                        + (inv != null ? $" {inv.NrOfItems()} 样" : ""));
+                    continue;
+                }
+                by[nm] = by.TryGetValue(nm, out int c) ? c + 1 : 1;
+                if (go) ZNetScene.instance.Destroy(go); else ZDOMan.instance.DestroyZDO(d);
+                if (++destroyed % 200 == 0) yield return null;
+            }
+            Log.LogInfo($"★ [拆旧] 销毁旧件 {destroyed} 个（{string.Join(", ", by.OrderByDescending(k => k.Value).Take(8).Select(k => k.Key + "×" + k.Value))}）；"
+                + $"有东西的箱子 {kept} 个没拆");
+            WriteFlag("demolish_done");
+        }
+
+        // ====================================================================
+        //  整格地形还原：文件里每个 zone 的地形编译器数组整格重写（未列出的顶点 = 未改），然后同 CommitWrites 存盘刷新。
+        //  格式：zone cx cz nHeight nPaint / h i level smooth / p i r g b a
+        // ====================================================================
+        private IEnumerator TerrainRestoreTask(Action<bool> done)
+        {
+            string path = Path.Combine(Paths.ConfigPath, CfgRestoreFile.Value);
+            if (!File.Exists(path)) { Log.LogError($"[地形还原] ★ 找不到 {path}"); done(false); yield break; }
+            string miss = TerrainReflectionMissing();
+            if (miss != null) { Log.LogError($"[地形还原] ★ 反射取不到 {miss}"); done(false); yield break; }
+            var zones = new List<KeyValuePair<Vector2Int, List<string[]>>>();
+            foreach (var raw in File.ReadAllLines(path))
+            {
+                var f = raw.Trim().Split(' ');
+                if (f.Length == 0 || f[0].StartsWith("#") || f[0].Length == 0) continue;
+                if (f[0] == "zone") zones.Add(new KeyValuePair<Vector2Int, List<string[]>>(new Vector2Int(int.Parse(f[1]), int.Parse(f[2])), new List<string[]>()));
+                else if (zones.Count > 0) zones[zones.Count - 1].Value.Add(f);
+            }
+            var hms = new List<Heightmap>();
+            foreach (var zkv in zones)
+            {
+                var c = new Vector3(zkv.Key.x, 0f, zkv.Key.y);
+                var hm = Heightmap.FindHeightmap(c);
+                if (hm == null || hm.IsDistantLod) { Log.LogError($"[地形还原] ★ zone ({zkv.Key.x},{zkv.Key.y}) 的 heightmap 没加载"); done(false); yield break; }
+                var tc = hm.GetAndCreateTerrainCompiler();
+                if (tc == null) { Log.LogError($"[地形还原] ★ zone ({zkv.Key.x},{zkv.Key.y}) 拿不到 TerrainComp"); done(false); yield break; }
+                tc.GetComponent<ZNetView>()?.ClaimOwnership();
+                var L = (float[])FiLevel.GetValue(tc); var Sd = (float[])FiSmooth.GetValue(tc); var M = (bool[])FiModH.GetValue(tc);
+                var Pm = (Color[])FiPaint.GetValue(tc); var MP = (bool[])FiModP.GetValue(tc);
+                for (int i = 0; i < M.Length; i++) { M[i] = false; L[i] = 0f; Sd[i] = 0f; }
+                for (int i = 0; i < MP.Length; i++) MP[i] = false;
+                int nh = 0, np = 0;
+                foreach (var f in zkv.Value)
+                {
+                    int i = int.Parse(f[1]);
+                    if (f[0] == "h" && i < M.Length) { M[i] = true; L[i] = Inv(f[2]); Sd[i] = Inv(f[3]); nh++; }
+                    else if (f[0] == "p" && i < MP.Length) { MP[i] = true; Pm[i] = new Color(Inv(f[2]), Inv(f[3]), Inv(f[4]), Inv(f[5])); np++; }
+                }
+                FiOps.SetValue(tc, (int)FiOps.GetValue(tc) + 1);
+                FiLastPt.SetValue(tc, Vector3.zero);
+                FiLastR.SetValue(tc, 0f);
+                MiSave.Invoke(tc, new object[] { false });
+                hm.Poke(0, false);
+                hms.Add(hm);
+                Log.LogInfo($"★ [地形还原] zone ({zkv.Key.x},{zkv.Key.y})：整格写回 改高 {nh} / 刷漆 {np} 个顶点（数组 {M.Length}/{MP.Length}）");
+            }
+            yield return StartCoroutine(WaitRegen(hms));
+            WriteFlag("terrain_restore_done");
+            done(true);
         }
 
         // ====================================================================
